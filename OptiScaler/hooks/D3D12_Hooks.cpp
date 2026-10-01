@@ -22,6 +22,11 @@
 
 #include "Hook_Utils.h"
 
+// --- [ORDO] TAA Interceptor registration ---------------------------------
+#include <taa_intercept/taa_interceptor.h>
+#include <taa_intercept/taa_config.h>
+// --- [ORDO] END ----------------------------------------------------------
+
 #pragma intrinsic(_ReturnAddress)
 
 using PFN_CheckFeatureSupport = rewrite_signature<decltype(&ID3D12Device::CheckFeatureSupport)>::type;
@@ -1414,6 +1419,10 @@ static void HookToCommandList(ID3D12Device* InDevice)
                 LOG_WARN("Early hooks into RootSignature are nullptr");
             }
 
+            // --- [ORDO] Initialize TAA interceptor with command list vtable ---
+            ordo::taa::Initialize(InDevice, commandList);
+            // --- [ORDO] END --------------------------------------------------
+
             commandList->Close();
             commandList->Release();
         }
@@ -1439,6 +1448,10 @@ static void UnhookAll()
         DetourDetach(&(PVOID&) s_SetGraphicsRootSignature.o_earlyHook, hkSetGraphicsRootSignature);
         s_SetGraphicsRootSignature.o_earlyHook = nullptr;
     }
+
+    // --- [ORDO] Shutdown TAA interceptor ---
+    ordo::taa::Shutdown();
+    // --- [ORDO] END ----------------------------------------------------------
 }
 
 VALIDATE_HOOK(hkD3D12CreateDevice, D3d12Proxy::PFN_D3D12CreateDevice)
@@ -2310,6 +2323,12 @@ static void HookToDevice(ID3D12Device* InDevice)
     {
         ResTrack_Dx12::HookDevice(InDevice);
     }
+    // --- [ORDO] Enable descriptor tracking when TAA interception is active ---
+    else if (ordo::taa::TAAConfig::Instance().enabled)
+    {
+        ResTrack_Dx12::HookDevice(InDevice);
+    }
+    // --- [ORDO] END ----------------------------------------------------------
 
     if (State::Instance().activeFgOutput == FGOutput::DLSSG && StreamlineProxy::LoadStreamline())
     {

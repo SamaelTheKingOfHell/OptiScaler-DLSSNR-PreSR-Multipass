@@ -22,6 +22,10 @@
 
 #include <magic_enum.hpp>
 
+// --- [ORDO] TAA Interceptor frame tick -----------------------------------
+#include <taa_intercept/taa_interceptor.h>
+// --- [ORDO] END ----------------------------------------------------------
+
 #ifdef LOW_LATENCY_INPUTS
 #include <low_latency/input/input_antilag2.h>
 #endif
@@ -291,6 +295,10 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     }
 
     LOG_DEBUG("{}", _frameCounter);
+
+    // --- [ORDO] Advance TAA frame counter ---
+    ordo::taa::OnPresent();
+    // --- [ORDO] END ----------------------------------------------------------
 
     HRESULT presentResult;
 

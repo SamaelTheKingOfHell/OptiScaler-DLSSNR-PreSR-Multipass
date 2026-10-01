@@ -45,24 +45,20 @@ static PFN_Dispatch o_Dispatch = nullptr;
 /// ```
 static bool TryResolveDescriptor(D3D12_GPU_DESCRIPTOR_HANDLE gpuHandle, ResourceInfo& outInfo)
 {
-    // Walk OptiScaler's tracked heaps to find the resource at this GPU handle
-    auto& heapMap = ResTrack_Dx12::GetHeapMap();
-    auto lock = ResTrack_Dx12::LockHeapMapShared();
+    if (gpuHandle.ptr == 0)
+        return false;
 
-    for (const auto& [heapPtr, heapInfo] : heapMap)
+    auto heap = ResTrack_Dx12::GetHeapByGpuHandleCR(gpuHandle.ptr);
+    if (heap != nullptr && heap->active.load(std::memory_order_acquire))
     {
-        if (!heapInfo || !heapInfo->active.load(std::memory_order_acquire))
-            continue;
-
-        if (heapInfo->GetByGpuHandle(gpuHandle.ptr, outInfo))
-            return true;
+        return heap->GetByGpuHandle(gpuHandle.ptr, outInfo) && outInfo.buffer != nullptr;
     }
 
     return false;
 }
 
-/// Build a DispatchSnapshot from the current command list root state.
-/// Uses OptiScaler's tracked descriptor heaps and root signature bindings.
+/// Build a DispatchSnapshot from the tracked resources.
+/// Uses OptiScaler's tracked descriptor heaps and resource tracking.
 ///
 /// ```cpp
 /// DispatchSnapshot snap;
@@ -78,51 +74,43 @@ static void BuildSnapshot(ID3D12GraphicsCommandList* cmdList,
     snap.srvs.clear();
     snap.uavs.clear();
 
-    // We can't directly enumerate all bound descriptors without tracking
-    // every SetComputeRootDescriptorTable call. For Phase 1 (discovery),
-    // we use a simpler approach: scan the tracked heaps for resources that
-    // were recently used (within this frame) and match render-resolution
-    // dimensions.
-    //
-    // This is a heuristic discovery pass — it casts a wide net.
-    // Phase 2 will refine this with exact root signature tracking.
-
     const uint64_t currentFrame = s_frameCounter.load(std::memory_order_relaxed);
 
-    auto& heapMap = ResTrack_Dx12::GetHeapMap();
-    auto lock = ResTrack_Dx12::LockHeapMapShared();
-
-    for (const auto& [heapPtr, heapInfo] : heapMap)
+    std::scoped_lock lock(_trackedResourcesMutex);
+    for (const auto& [resource, slots] : _trackedResources)
     {
-        if (!heapInfo || !heapInfo->active.load(std::memory_order_acquire))
+        if (resource == nullptr || slots.empty())
             continue;
 
-        // Only scan CBV_SRV_UAV heaps (type 0)
-        if (heapInfo->type != 0)
-            continue;
-
-        for (UINT i = 0; i < heapInfo->numDescriptors; i++)
+        for (const auto& slot : slots)
         {
-            const auto& info = heapInfo->info[i];
-            if (info.buffer == nullptr)
+            auto heap = slot.heap.lock();
+            if (!heap || !heap->active.load(std::memory_order_acquire))
                 continue;
 
-            // Only look at resources used in the current frame
-            if (info.lastUsedFrame == 0 || 
-                static_cast<uint64_t>(info.lastUsedFrame) < currentFrame - 1)
-                continue;
+            SIZE_T gpuHandle = heap->gpuStart + static_cast<SIZE_T>(slot.index) * heap->increment;
+            ResourceInfo info {};
+            if (heap->GetByGpuHandle(gpuHandle, info) && info.buffer != nullptr)
+            {
+                // Only consider resources matching or relevant to the dispatch
+                if (info.lastUsedFrame != 0 &&
+                    static_cast<uint64_t>(info.lastUsedFrame) < currentFrame - 1)
+                    continue;
 
-            BoundResource bound;
-            bound.resource = info.buffer;
-            bound.format = info.format;
-            bound.width = info.width;
-            bound.height = info.height;
-            bound.type = info.type;
+                BoundResource bound;
+                bound.resource = info.buffer;
+                bound.format = info.format;
+                bound.width = info.width;
+                bound.height = info.height;
+                bound.type = info.type;
 
-            if (info.type == ResourceType::SRV)
-                snap.srvs.push_back(bound);
-            else if (info.type == ResourceType::UAV)
-                snap.uavs.push_back(bound);
+                if (info.type == ResourceType::SRV)
+                    snap.srvs.push_back(bound);
+                else if (info.type == ResourceType::UAV)
+                    snap.uavs.push_back(bound);
+
+                break;
+            }
         }
     }
 }
@@ -167,26 +155,23 @@ void Initialize(ID3D12Device* device, ID3D12GraphicsCommandList* commandList)
     s_device = device;
 
     // Load configuration from OptiScaler.ini
-    // OptiScaler sets its DLL path which we can derive the INI location from
-    auto& state = State::Instance();
     std::string iniPath;
-
-    // Try to find OptiScaler.ini next to the game exe
     wchar_t exePath[MAX_PATH];
-    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    std::wstring wExePath(exePath);
-    auto lastSlash = wExePath.find_last_of(L'\\');
-    if (lastSlash != std::wstring::npos)
+    if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) > 0)
     {
-        std::wstring wDir = wExePath.substr(0, lastSlash + 1);
-        std::wstring wIniPath = wDir + L"OptiScaler.ini";
-
-        // Convert to narrow string for our parser
-        int size = WideCharToMultiByte(CP_UTF8, 0, wIniPath.c_str(), -1, nullptr, 0, nullptr, nullptr);
-        if (size > 0)
+        std::wstring wExePath(exePath);
+        auto lastSlash = wExePath.find_last_of(L"\\/");
+        if (lastSlash != std::wstring::npos)
         {
-            iniPath.resize(size - 1);
-            WideCharToMultiByte(CP_UTF8, 0, wIniPath.c_str(), -1, iniPath.data(), size, nullptr, nullptr);
+            std::wstring wDir = wExePath.substr(0, lastSlash + 1);
+            std::wstring wIniPath = wDir + L"OptiScaler.ini";
+
+            int size = WideCharToMultiByte(CP_UTF8, 0, wIniPath.c_str(), -1, nullptr, 0, nullptr, nullptr);
+            if (size > 0)
+            {
+                iniPath.resize(size - 1);
+                WideCharToMultiByte(CP_UTF8, 0, wIniPath.c_str(), -1, iniPath.data(), size, nullptr, nullptr);
+            }
         }
     }
 
@@ -280,7 +265,6 @@ bool OnDispatch(ID3D12GraphicsCommandList* commandList,
     // If we already have a confirmed pass, check if this is the same pipeline
     if (s_detector.HasConfirmedPass())
     {
-        // Phase 1: Just log that we see it. Phase 2 will suppress + extract.
         if (config.logPerFrame)
         {
             LOG_DEBUG("[ORDO] Confirmed TAA pass dispatched: {}x{}x{}",
