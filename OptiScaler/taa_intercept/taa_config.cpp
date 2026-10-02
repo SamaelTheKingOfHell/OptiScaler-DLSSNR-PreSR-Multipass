@@ -126,10 +126,45 @@ void TAAConfig::LoadFromINI(const std::string& iniPath)
             motionVectorFormat = ParseUint(value, motionVectorFormat);
         else if (IEquals(key, "Profile"))
             profileName = value;
+        else if (IEquals(key, "ForceUpscaling"))
+            forceUpscaling = ParseBool(value);
+        else if (IEquals(key, "QualityMode"))
+            qualityMode = ParseUint(value, qualityMode);
+        else if (IEquals(key, "CustomScaleRatio"))
+        {
+            try { customScaleRatio = std::stof(value); } catch (...) {}
+        }
     }
 
-    LOG_INFO("[ORDO] TAAConfig loaded: Enabled={}, LogDiscovery={}, ConfirmFrames={}, Profile='{}'",
-             enabled, logDiscovery, confirmFrames, profileName);
+    LOG_INFO("[ORDO] TAAConfig loaded: Enabled={}, ForceUpscaling={}, QualityMode={}({}), ConfirmFrames={}, Profile='{}'",
+             enabled, forceUpscaling, qualityMode, QualityModeName(qualityMode), confirmFrames, profileName);
+}
+
+const char* TAAConfig::QualityModeName(uint32_t mode)
+{
+    switch (mode)
+    {
+    case 0: return "Ultra Quality (1.3x)";
+    case 1: return "Quality (1.5x)";
+    case 2: return "Balanced (1.7x)";
+    case 3: return "Performance (2.0x)";
+    case 4: return "Ultra Performance (3.0x)";
+    case 5: return "Custom";
+    default: return "Quality (1.5x)";
+    }
+}
+
+float TAAConfig::QualityModeRatio(uint32_t mode)
+{
+    switch (mode)
+    {
+    case 0: return 1.30f;
+    case 1: return 1.50f;
+    case 2: return 1.70f;
+    case 3: return 2.00f;
+    case 4: return 3.00f;
+    default: return 1.50f;
+    }
 }
 
 } // namespace ordo::taa

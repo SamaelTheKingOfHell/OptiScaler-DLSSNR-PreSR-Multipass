@@ -29,6 +29,10 @@
 
 #include <upscaler_time/UpscalerTime_Vk.h>
 
+// --- [ORDO] TAA / Forced Upscaling Menu ---
+#include <taa_intercept/taa_menu.h>
+// --- [ORDO] END ----------------------------
+
 #include <imgui/imgui_internal.h>
 #include <imgui/ImGuiNotify.hpp>
 #include <imgui/imgui_impl_win32.h>
@@ -3175,6 +3179,36 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
             }
         }
     }
+    // --- [ORDO] Enable upscaler selection even when no native game feature is active ---
+    else
+    {
+        ImGui::SeparatorText("Upscalers");
+        ShowTooltip("Select the upscaler backend to inject for games without native DLSS/FSR");
+
+        GetCurrentBackendInfo(state.api, currentBackend, &currentBackendName);
+
+        ImGui::PushItemWidth(180.0f * menuResScale);
+
+        ImGui::Text("%s", primaryGpu.name.c_str());
+
+        switch (state.api)
+        {
+        case DX11:
+            AddDx11Backends(currentBackend);
+            break;
+        case DX12:
+        default:
+            AddDx12Backends(currentBackend);
+            break;
+        case Vulkan:
+            AddVulkanBackends(currentBackend);
+            break;
+        }
+
+        ImGui::PopItemWidth();
+        ImGui::Spacing();
+    }
+    // --- [ORDO] END ------------------------------------------------------------------
 }
 
 #if defined(OPTISCALER_RTX40_MFG)
@@ -7339,6 +7373,11 @@ void MenuCommon::RenderMainMenuTable(RenderMenuContext& ctx)
 
         // Left column: active upscaler state, frame generation, FSR common, latency and fakenvapi controls.
         RenderActiveUpscalerSettings(ctx);
+
+        // --- [ORDO] Render ORDO Forced Upscaler & TAA Intercept controls ---
+        ordo::taa::RenderMenu(ctx.config, ctx.menuResScale);
+        // --- [ORDO] END ----------------------------------------------------
+
         RenderFrameGenerationSelection(ctx);
         RenderFrameGenerationRuntimeSettings(ctx);
         RenderFsrCommonSettings(ctx);

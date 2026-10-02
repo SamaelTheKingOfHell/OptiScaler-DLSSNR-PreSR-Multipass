@@ -43,6 +43,14 @@ struct TAAConfig
     // --- Profile override ---
     std::string profileName;  // If set, skip auto-detect and use this profile
 
+    // --- Force Upscaling Override ---
+    bool forceUpscaling = false;          // Manual override, default OFF to avoid startup crashes
+    uint32_t qualityMode = 1;             // 0: Ultra Quality, 1: Quality, 2: Balanced, 3: Performance, 4: Ultra Performance, 5: Custom
+    float customScaleRatio = 1.5f;        // Custom scale ratio
+
+    static const char* QualityModeName(uint32_t mode);
+    static float QualityModeRatio(uint32_t mode);
+
     // --- Singleton access ---
     static TAAConfig& Instance();
 
