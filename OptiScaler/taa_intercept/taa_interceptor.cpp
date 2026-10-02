@@ -92,11 +92,6 @@ static void BuildSnapshot(ID3D12GraphicsCommandList* cmdList,
             ResourceInfo info {};
             if (heap->GetByGpuHandle(gpuHandle, info) && info.buffer != nullptr)
             {
-                // Only consider resources matching or relevant to the dispatch
-                if (info.lastUsedFrame != 0 &&
-                    static_cast<uint64_t>(info.lastUsedFrame) < currentFrame - 1)
-                    continue;
-
                 BoundResource bound;
                 bound.resource = info.buffer;
                 bound.format = info.format;
@@ -125,9 +120,13 @@ static void STDMETHODCALLTYPE hkDispatch(ID3D12GraphicsCommandList* cmdList,
                                           UINT ThreadGroupCountY,
                                           UINT ThreadGroupCountZ)
 {
-    // Always call the original first in Phase 1 (discovery mode).
-    // We only observe and log — we don't suppress yet.
-    // Phase 2 will add suppression for confirmed passes.
+    static std::atomic<uint32_t> s_totalDispatches { 0 };
+    uint32_t total = s_totalDispatches.fetch_add(1);
+
+    if (total < 10 || (total % 1000 == 0))
+    {
+        LOG_INFO("[ORDO] hkDispatch #{} called: {}x{}x{}", total, ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ);
+    }
 
     bool intercepted = false;
 
@@ -137,8 +136,6 @@ static void STDMETHODCALLTYPE hkDispatch(ID3D12GraphicsCommandList* cmdList,
         intercepted = OnDispatch(cmdList, ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ);
     }
 
-    // In Phase 1, always call original regardless of interception result
-    // Phase 2 will skip the original when intercepted = true
     if (o_Dispatch)
     {
         o_Dispatch(cmdList, ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ);
@@ -262,6 +259,16 @@ bool OnDispatch(ID3D12GraphicsCommandList* commandList,
     if (inferredW < config.minDispatchWidth || inferredH < config.minDispatchHeight)
         return false;
 
+    static std::atomic<uint32_t> s_dispatchCallCount { 0 };
+    uint32_t callNum = s_dispatchCallCount.fetch_add(1);
+
+    if (callNum < 15 || (callNum % 500 == 0))
+    {
+        LOG_INFO("[ORDO] OnDispatch #{} (thread groups: {}x{}x{}, inferred: {}x{}), frame={}",
+                 callNum, threadGroupCountX, threadGroupCountY, threadGroupCountZ,
+                 inferredW, inferredH, frame);
+    }
+
     // If we already have a confirmed pass, check if this is the same pipeline
     if (s_detector.HasConfirmedPass())
     {
@@ -277,11 +284,22 @@ bool OnDispatch(ID3D12GraphicsCommandList* commandList,
     DispatchSnapshot snapshot;
     BuildSnapshot(commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ, snapshot);
 
+    if (callNum < 15 || (callNum % 500 == 0))
+    {
+        LOG_INFO("[ORDO]   Snapshot #{} has {} SRVs, {} UAVs (total tracked: {})",
+                 callNum, snapshot.srvs.size(), snapshot.uavs.size(), _trackedResources.size());
+    }
+
     // Skip dispatches with too few bound resources
     if (snapshot.srvs.size() < 2 || snapshot.uavs.empty())
         return false;
 
     auto result = s_detector.ScoreDispatch(snapshot);
+
+    if (callNum < 15 || (callNum % 500 == 0) || result.score >= 0.3f)
+    {
+        LOG_INFO("[ORDO]   Score for #{}: {:.2f}", callNum, result.score);
+    }
 
     if (result.score >= s_detector.GetConfidenceThreshold())
     {
