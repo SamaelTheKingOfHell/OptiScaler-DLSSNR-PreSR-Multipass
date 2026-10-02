@@ -401,7 +401,7 @@ static void hkSetDescriptorHeaps(ID3D12GraphicsCommandList* commandList, UINT Nu
     {
         auto config = Config::Instance();
 
-        if (config->FGHudfixPersistentBindings.value_or_default())
+        if (config->FGHudfixPersistentBindings.value_or_default() || ordo::taa::TAAConfig::Instance().enabled)
             ResTrack_Dx12::OnSetDescriptorHeaps(commandList, NumDescriptorHeaps, ppDescriptorHeaps);
 
         if (config->ExtendedStateRestore.value_or_default() && ppDescriptorHeaps != nullptr)
@@ -471,7 +471,7 @@ static void hkSetComputeRootSignature(ID3D12GraphicsCommandList* commandList, ID
     {
         auto config = Config::Instance();
 
-        if (config->FGHudfixPersistentBindings.value_or_default())
+        if (config->FGHudfixPersistentBindings.value_or_default() || ordo::taa::TAAConfig::Instance().enabled)
             ResTrack_Dx12::OnSetComputeRootSignature(commandList, pRootSignature);
 
         if (config->RestoreComputeSignature.value_or_default() && pRootSignature != nullptr)
@@ -621,7 +621,7 @@ static void hkSetGraphicsRootSignature(ID3D12GraphicsCommandList* commandList, I
     {
         auto config = Config::Instance();
 
-        if (config->FGHudfixPersistentBindings.value_or_default())
+        if (config->FGHudfixPersistentBindings.value_or_default() || ordo::taa::TAAConfig::Instance().enabled)
             ResTrack_Dx12::OnSetGraphicsRootSignature(commandList, pRootSignature);
 
         if (config->RestoreGraphicSignature.value_or_default() && pRootSignature != nullptr)
@@ -785,7 +785,7 @@ static void hkSetDescriptorHeapsLate(ID3D12GraphicsCommandList* commandList, UIN
     {
         auto config = Config::Instance();
 
-        if (config->FGHudfixPersistentBindings.value_or_default())
+        if (config->FGHudfixPersistentBindings.value_or_default() || ordo::taa::TAAConfig::Instance().enabled)
             ResTrack_Dx12::OnSetDescriptorHeaps(commandList, NumDescriptorHeaps, ppDescriptorHeaps);
 
         if (config->ExtendedStateRestore.value_or_default() && ppDescriptorHeaps != nullptr)
@@ -816,7 +816,7 @@ static void hkSetComputeRootSignatureLate(ID3D12GraphicsCommandList* commandList
     {
         auto config = Config::Instance();
 
-        if (config->FGHudfixPersistentBindings.value_or_default())
+        if (config->FGHudfixPersistentBindings.value_or_default() || ordo::taa::TAAConfig::Instance().enabled)
             ResTrack_Dx12::OnSetComputeRootSignature(commandList, pRootSignature);
 
         if (config->RestoreComputeSignature.value_or_default() && pRootSignature != nullptr)
@@ -992,7 +992,7 @@ static void hkSetGraphicsRootSignatureLate(ID3D12GraphicsCommandList* commandLis
     {
         auto config = Config::Instance();
 
-        if (config->FGHudfixPersistentBindings.value_or_default())
+        if (config->FGHudfixPersistentBindings.value_or_default() || ordo::taa::TAAConfig::Instance().enabled)
             ResTrack_Dx12::OnSetGraphicsRootSignature(commandList, pRootSignature);
 
         if (config->RestoreGraphicSignature.value_or_default() && pRootSignature != nullptr)
@@ -1161,7 +1161,8 @@ void D3D12Hooks::HookToCommandListLate(ID3D12GraphicsCommandList* commandList)
     const bool restoreComputeSignature = config->RestoreComputeSignature.value_or_default();
     const bool restoreGraphicSignature = config->RestoreGraphicSignature.value_or_default();
     const bool extendedRestoreSignature = config->ExtendedStateRestore.value_or_default();
-    const bool persistentBindings = config->FGHudfixPersistentBindings.value_or_default();
+    const bool persistentBindings = config->FGHudfixPersistentBindings.value_or_default() ||
+                                    ordo::taa::TAAConfig::Instance().enabled;
 
     s_SetPipelineState.o_lateHook = (PFN_SetPipelineState) pVTable[25];
     s_SetDescriptorHeaps.o_lateHook = (PFN_SetDescriptorHeaps) pVTable[28];
@@ -1188,7 +1189,7 @@ void D3D12Hooks::HookToCommandListLate(ID3D12GraphicsCommandList* commandList)
             DetourAttach(&(PVOID&) s_SetPipelineState.o_lateHook, hkSetPipelineStateLate);
 
         if (s_SetDescriptorHeaps.o_lateHook != nullptr &&
-            (extendedRestoreSignature || (persistentBindings && State::Instance().activeFgInput == FGInput::Upscaler)))
+            (extendedRestoreSignature || persistentBindings))
         {
             DetourAttach(&(PVOID&) s_SetDescriptorHeaps.o_lateHook, hkSetDescriptorHeapsLate);
         }
@@ -1328,7 +1329,8 @@ static void HookToCommandList(ID3D12Device* InDevice)
 
             auto config = Config::Instance();
             const bool extendedRestoreSignature = config->ExtendedStateRestore.value_or_default();
-            const bool persistentBindings = config->FGHudfixPersistentBindings.value_or_default();
+            const bool persistentBindings = config->FGHudfixPersistentBindings.value_or_default() ||
+                                            ordo::taa::TAAConfig::Instance().enabled;
 
             s_SetPipelineState.o_earlyHook = (PFN_SetPipelineState) pVTable[25];
             s_SetDescriptorHeaps.o_earlyHook = (PFN_SetDescriptorHeaps) pVTable[28];
@@ -1354,8 +1356,7 @@ static void HookToCommandList(ID3D12Device* InDevice)
                     DetourAttach(&(PVOID&) s_SetPipelineState.o_earlyHook, hkSetPipelineState);
 
                 if (s_SetDescriptorHeaps.o_earlyHook != nullptr &&
-                    (extendedRestoreSignature ||
-                     (persistentBindings && State::Instance().activeFgInput == FGInput::Upscaler)))
+                    (extendedRestoreSignature || persistentBindings))
                 {
                     DetourAttach(&(PVOID&) s_SetDescriptorHeaps.o_earlyHook, hkSetDescriptorHeaps);
                 }
@@ -1397,6 +1398,8 @@ static void HookToCommandList(ID3D12Device* InDevice)
                 if (DetourTransactionCommit() == NO_ERROR)
                 {
                     LOG_DEBUG("Hooked RootSignature functions");
+                    LOG_INFO("[ORDO] HookToCommandList: persistentBindings={}, s_SetDescriptorHeaps attached={}",
+                             persistentBindings, s_SetDescriptorHeaps.o_earlyHook != nullptr);
                 }
                 else
                 {
@@ -2065,9 +2068,10 @@ static HRESULT hkCreateRootSignature(ID3D12Device* device, UINT nodeMask, const 
     const bool extendedStateRestore = config->ExtendedStateRestore.value_or_default();
     const bool samplerOverride = config->MipmapBiasOverride.has_value() || config->AnisotropyOverride.has_value();
     const bool trackRootParameterCount = extendedStateRestore || samplerOverride;
-    const bool trackHudfixRootSignature = config->FGHudfixPersistentBindings.value_or_default() &&
-                                          State::Instance().activeFgInput == FGInput::Upscaler &&
-                                          !config->FGDisableHUDFix.value_or_default();
+    const bool trackHudfixRootSignature = ((config->FGHudfixPersistentBindings.value_or_default() &&
+                                           State::Instance().activeFgInput == FGInput::Upscaler &&
+                                           !config->FGDisableHUDFix.value_or_default()) ||
+                                           ordo::taa::TAAConfig::Instance().enabled);
 
     if (!samplerOverride && !extendedStateRestore && !trackHudfixRootSignature)
     {

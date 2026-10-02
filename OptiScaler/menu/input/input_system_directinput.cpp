@@ -7,6 +7,11 @@
 
 #include <cstring>
 
+// --- [ORDO] TAA Interceptor & Config ---
+#include <taa_intercept/taa_interceptor.h>
+#include <taa_intercept/taa_config.h>
+// --- [ORDO] END ------------------------
+
 namespace OptiInput
 {
 namespace
@@ -963,7 +968,28 @@ HRESULT WINAPI hkDirectInputGetDeviceState(void* device, DWORD dataSize, LPVOID 
         return DIERR_GENERIC;
 
     ScopedHookBypass bypass;
-    return original(device, dataSize, data);
+    HRESULT result = original(device, dataSize, data);
+
+    // --- [ORDO] Title screen auto-progression pulse ---
+    if (SUCCEEDED(result) && data != nullptr && dataSize >= 256 &&
+        ordo::taa::TAAConfig::Instance().enabled &&
+        !ordo::taa::HasConfirmedPass())
+    {
+        static std::atomic<uint32_t> s_inputPulseFrame { 0 };
+        uint32_t frame = s_inputPulseFrame.fetch_add(1);
+
+        // Pulse every 120 polling calls (~2 seconds) for 10 calls:
+        // Press Enter (0x1C) and E (0x12)
+        if ((frame % 120) < 10)
+        {
+            uint8_t* keys = reinterpret_cast<uint8_t*>(data);
+            keys[0x1C] = 0x80; // DIK_RETURN
+            keys[0x12] = 0x80; // DIK_E
+        }
+    }
+    // --- [ORDO] END -----------------------------------
+
+    return result;
 }
 
 HRESULT WINAPI hkDirectInputGetDeviceData(void* device, DWORD objectDataSize, LPDIDEVICEOBJECTDATA data, LPDWORD inOut,

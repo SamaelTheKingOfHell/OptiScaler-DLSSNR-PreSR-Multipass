@@ -50,6 +50,10 @@
 #include <misc/IdentifyGpu.h>
 #include <sha1/sha1.hpp>
 
+// --- [ORDO] Early TAA Config ---
+#include <taa_intercept/taa_config.h>
+// --- [ORDO] END ----------------
+
 static std::vector<HMODULE> _asiHandles;
 static std::vector<std::filesystem::directory_entry> _lateLoadingEntries;
 static bool _passThruMode = false;
@@ -1862,6 +1866,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         spdlog::info("");
         spdlog::info("Setting DllPath to {}", wstring_to_string(Config::Instance()->MainDllPath.value()));
         spdlog::info("");
+
+        // --- [ORDO] Early load TAAConfig so hooking gates are active before D3D12 device creation ---
+        {
+            auto iniPath = (Util::ExePath().parent_path() / "OptiScaler.ini").string();
+            ordo::taa::TAAConfig::Instance().LoadFromINI(iniPath);
+        }
+        // --- [ORDO] END -----------------------------------------------------------------------------
 
 #ifdef VER_PRE_RELEASE
         spdlog::info("Pre-release build, disabling update checks");

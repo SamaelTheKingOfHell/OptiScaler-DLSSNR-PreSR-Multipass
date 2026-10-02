@@ -10,6 +10,11 @@
 
 #include <menu/menu_overlay_dx.h>
 
+// --- [ORDO] TAA Interceptor ---
+#include <taa_intercept/taa_interceptor.h>
+#include <taa_intercept/taa_config.h>
+// --- [ORDO] END ---------------
+
 #include <algorithm>
 #include <future>
 
@@ -206,6 +211,12 @@ bool ResTrack_Dx12::TrackResourceRelease(ID3D12Resource* resource)
     {
         LOG_DEBUG("ID3DDestructionNotifier is not available for resource {:X}, result: {:X}", (size_t) resource,
                   (UINT) result);
+        if (ordo::taa::TAAConfig::Instance().enabled)
+        {
+            std::lock_guard trackedLock(_trackedResourcesMutex);
+            _trackedResources.try_emplace(resource);
+            return true;
+        }
         return false;
     }
 
@@ -216,6 +227,12 @@ bool ResTrack_Dx12::TrackResourceRelease(ID3D12Resource* resource)
         LOG_WARN("Can't register destruction callback for resource {:X}, result: {:X}", (size_t) resource,
                  (UINT) result);
         notifier->Release();
+        if (ordo::taa::TAAConfig::Instance().enabled)
+        {
+            std::lock_guard trackedLock(_trackedResourcesMutex);
+            _trackedResources.try_emplace(resource);
+            return true;
+        }
         return false;
     }
 
@@ -242,30 +259,47 @@ bool ResTrack_Dx12::CheckResource(ID3D12Resource* resource, ResourceInfo* outInf
     if (resDesc.DepthOrArraySize != 1 || resDesc.SampleDesc.Count != 1)
         return false;
 
-    // depth, rt, video etc
-    constexpr auto unsupportedFlags =
-        D3D12_RESOURCE_FLAG_RAYTRACING_ACCELERATION_STRUCTURE | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL |
-        D3D12_RESOURCE_FLAG_VIDEO_DECODE_REFERENCE_ONLY | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE |
-        D3D12_RESOURCE_FLAG_VIDEO_ENCODE_REFERENCE_ONLY;
-
-    // Early reject
-    if ((resDesc.Flags & unsupportedFlags) != 0)
-        return false;
-
-    auto& s = State::Instance();
-    const uint32_t width = s.currentSwapchainDesc.BufferDesc.Width;
-    const uint32_t height = s.currentSwapchainDesc.BufferDesc.Height;
-
-    if (resDesc.Height != height || resDesc.Width != width)
+    // --- [ORDO] Allow depth and variable sizes for TAA resource extraction ---
+    if (ordo::taa::TAAConfig::Instance().enabled)
     {
-        // Need to make these tolarances global
-        const auto toleranceX = width / 20;
-        const auto toleranceY = height / 20;
+        constexpr auto ordoUnsupportedFlags =
+            D3D12_RESOURCE_FLAG_RAYTRACING_ACCELERATION_STRUCTURE |
+            D3D12_RESOURCE_FLAG_VIDEO_DECODE_REFERENCE_ONLY |
+            D3D12_RESOURCE_FLAG_VIDEO_ENCODE_REFERENCE_ONLY;
 
-        if (!(resDesc.Height >= height - toleranceY && resDesc.Height <= height + toleranceY &&
-              resDesc.Width >= width - toleranceX && resDesc.Width <= width + toleranceX))
-        {
+        if ((resDesc.Flags & ordoUnsupportedFlags) != 0)
             return false;
+
+        if (resDesc.Width < 32 || resDesc.Height < 32)
+            return false;
+    }
+    else
+    {
+        // depth, rt, video etc
+        constexpr auto unsupportedFlags =
+            D3D12_RESOURCE_FLAG_RAYTRACING_ACCELERATION_STRUCTURE | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL |
+            D3D12_RESOURCE_FLAG_VIDEO_DECODE_REFERENCE_ONLY | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE |
+            D3D12_RESOURCE_FLAG_VIDEO_ENCODE_REFERENCE_ONLY;
+
+        // Early reject
+        if ((resDesc.Flags & unsupportedFlags) != 0)
+            return false;
+
+        auto& s = State::Instance();
+        const uint32_t width = s.currentSwapchainDesc.BufferDesc.Width;
+        const uint32_t height = s.currentSwapchainDesc.BufferDesc.Height;
+
+        if (resDesc.Height != height || resDesc.Width != width)
+        {
+            // Need to make these tolarances global
+            const auto toleranceX = width / 20;
+            const auto toleranceY = height / 20;
+
+            if (!(resDesc.Height >= height - toleranceY && resDesc.Height <= height + toleranceY &&
+                  resDesc.Width >= width - toleranceX && resDesc.Width <= width + toleranceX))
+            {
+                return false;
+            }
         }
     }
 
@@ -732,6 +766,33 @@ void ResTrack_Dx12::hkCreateUnorderedAccessView(ID3D12Device* This, ID3D12Resour
     // }
 }
 
+void ResTrack_Dx12::hkCreateDepthStencilView(ID3D12Device* This, ID3D12Resource* pResource,
+                                             D3D12_DEPTH_STENCIL_VIEW_DESC* pDesc,
+                                             D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
+{
+    o_CreateDepthStencilView(This, pResource, pDesc, DestDescriptor);
+
+    ResourceInfo resInfo {};
+    if (pResource == nullptr || !CheckResource(pResource, &resInfo))
+    {
+        auto heap = GetHeapByCpuHandle(DestDescriptor.ptr);
+        if (heap != nullptr)
+            heap->ClearByCpuHandle(DestDescriptor.ptr);
+        return;
+    }
+
+    auto heap = GetHeapByCpuHandle(DestDescriptor.ptr);
+    if (heap != nullptr)
+    {
+        resInfo.type = RTV;
+        resInfo.state = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+        resInfo.captureInfo = CaptureInfo::OMSetRTV;
+        if (pDesc != nullptr && pDesc->Format != DXGI_FORMAT_UNKNOWN)
+            resInfo.format = pDesc->Format;
+        heap->SetByCpuHandle(DestDescriptor.ptr, resInfo);
+    }
+}
+
 #pragma endregion
 
 static void STDMETHODCALLTYPE hkNrExecuteCommandLists(ID3D12CommandQueue* queue, UINT count,
@@ -793,7 +854,8 @@ HRESULT ResTrack_Dx12::hkCreateDescriptorHeap(ID3D12Device* This, D3D12_DESCRIPT
 
     // try to calculate handle ranges for heap
     if (result == S_OK && (pDescriptorHeapDesc->Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
-                           pDescriptorHeapDesc->Type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV))
+                           pDescriptorHeapDesc->Type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV ||
+                           (ordo::taa::TAAConfig::Instance().enabled && pDescriptorHeapDesc->Type == D3D12_DESCRIPTOR_HEAP_TYPE_DSV)))
     {
         auto heap = (ID3D12DescriptorHeap*) (*ppvHeap);
 
@@ -879,13 +941,15 @@ void ResTrack_Dx12::hkCopyDescriptors(ID3D12Device* This, UINT NumDestDescriptor
 
     // Early exit conditions - consistent validation
     if (DescriptorHeapsType != D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV &&
-        DescriptorHeapsType != D3D12_DESCRIPTOR_HEAP_TYPE_RTV)
+        DescriptorHeapsType != D3D12_DESCRIPTOR_HEAP_TYPE_RTV &&
+        (!ordo::taa::TAAConfig::Instance().enabled || DescriptorHeapsType != D3D12_DESCRIPTOR_HEAP_TYPE_DSV))
         return;
 
     if (NumDestDescriptorRanges == 0 || pDestDescriptorRangeStarts == nullptr)
         return;
 
-    if (!Config::Instance()->FGAlwaysTrackHeaps.value_or_default() && !IsHudFixActive())
+    if (!Config::Instance()->FGAlwaysTrackHeaps.value_or_default() && !IsHudFixActive() &&
+        !ordo::taa::TAAConfig::Instance().enabled)
         return;
 
     const UINT inc = This->GetDescriptorHandleIncrementSize(DescriptorHeapsType);
@@ -1004,10 +1068,12 @@ void ResTrack_Dx12::hkCopyDescriptorsSimple(ID3D12Device* This, UINT NumDescript
                             DescriptorHeapsType);
 
     if (DescriptorHeapsType != D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV &&
-        DescriptorHeapsType != D3D12_DESCRIPTOR_HEAP_TYPE_RTV)
+        DescriptorHeapsType != D3D12_DESCRIPTOR_HEAP_TYPE_RTV &&
+        (!ordo::taa::TAAConfig::Instance().enabled || DescriptorHeapsType != D3D12_DESCRIPTOR_HEAP_TYPE_DSV))
         return;
 
-    if (!Config::Instance()->FGAlwaysTrackHeaps.value_or_default() && !IsHudFixActive())
+    if (!Config::Instance()->FGAlwaysTrackHeaps.value_or_default() && !IsHudFixActive() &&
+        !ordo::taa::TAAConfig::Instance().enabled)
         return;
 
     if (NumDescriptors == 0)
@@ -1298,22 +1364,11 @@ void ResTrack_Dx12::RegisterRootSignature(ID3D12RootSignature* rootSignature,
 
     ID3DDestructionNotifier* notifier = nullptr;
     auto result = rootSignature->QueryInterface(IID_PPV_ARGS(&notifier));
-    if (FAILED(result) || notifier == nullptr)
+    if (SUCCEEDED(result) && notifier != nullptr)
     {
-        LOG_DEBUG("ID3DDestructionNotifier is not available for root signature {:X}, result: {:X}",
-                  (size_t) rootSignature, (UINT) result);
-        return;
-    }
-
-    UINT callbackId = 0;
-    result = notifier->RegisterDestructionCallback(&ResTrack_Dx12::RootSignatureDestroyed, rootSignature, &callbackId);
-    notifier->Release();
-
-    if (FAILED(result))
-    {
-        LOG_DEBUG("Can't register root signature remove callback for {:X}, result: {:X}", (size_t) rootSignature,
-                  (UINT) result);
-        return;
+        UINT callbackId = 0;
+        notifier->RegisterDestructionCallback(&ResTrack_Dx12::RootSignatureDestroyed, rootSignature, &callbackId);
+        notifier->Release();
     }
 
     std::lock_guard<std::mutex> lock(_rootSignatureInfoMutex);
@@ -1866,6 +1921,7 @@ void ResTrack_Dx12::hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT N
             persistentBinding = true;
             state->renderTargetCount = 0;
             state->renderTargetsContiguous = false;
+            state->depthStencil = pDepthStencilDescriptor ? pDepthStencilDescriptor->ptr : 0;
 
             if (NumRenderTargetDescriptors > 0 && pRenderTargetDescriptors != nullptr)
             {
@@ -1874,10 +1930,29 @@ void ResTrack_Dx12::hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT N
                 state->renderTargetsContiguous = RTsSingleHandleToDescriptorRange != FALSE;
 
                 if (state->renderTargetsContiguous)
+                {
                     state->renderTargets[0] = pRenderTargetDescriptors[0].ptr;
+                    auto heap = GetHeapByCpuHandleRTV(state->renderTargets[0]);
+                    SIZE_T inc = (heap != nullptr) ? heap->increment : 0;
+                    if (inc > 0)
+                    {
+                        for (UINT i = 1; i < state->renderTargetCount; ++i)
+                            state->renderTargets[i] = state->renderTargets[0] + i * inc;
+                    }
+                }
                 else
+                {
                     for (UINT i = 0; i < state->renderTargetCount; ++i)
                         state->renderTargets[i] = pRenderTargetDescriptors[i].ptr;
+                }
+
+                static std::atomic<bool> s_firstOMSetRT { true };
+                if (s_firstOMSetRT.exchange(false))
+                {
+                    LOG_INFO("[ORDO] First hkOMSetRenderTargets: numRTs={}, contiguous={}, RT0={:X}, DSV={:X}",
+                             state->renderTargetCount, state->renderTargetsContiguous,
+                             state->renderTargets[0], state->depthStencil);
+                }
             }
         }
     }
@@ -2165,6 +2240,19 @@ void ResTrack_Dx12::hkDrawInstanced(ID3D12GraphicsCommandList* This, UINT Vertex
 {
     o_DrawInstanced(This, VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
 
+    // --- [ORDO] TAA Draw Interceptor ---
+    if (ordo::taa::TAAConfig::Instance().enabled)
+    {
+        static std::atomic<bool> s_firstDraw { true };
+        if (s_firstDraw.exchange(false))
+        {
+            LOG_INFO("[ORDO] First hkDrawInstanced intercepted! CmdList={:X}, Verts={}, Instances={}",
+                     (size_t) This, VertexCountPerInstance, InstanceCount);
+        }
+        ordo::taa::OnDrawInstanced(This, VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
+    }
+    // --- [ORDO] END -------------------
+
     if (!IsHudFixActive())
     {
         LOG_TRACK("Skipping {:X}", (size_t) This);
@@ -2278,6 +2366,19 @@ void ResTrack_Dx12::hkDrawIndexedInstanced(ID3D12GraphicsCommandList* This, UINT
     o_DrawIndexedInstanced(This, IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation,
                            StartInstanceLocation);
 
+    // --- [ORDO] TAA DrawIndexed Interceptor ---
+    if (ordo::taa::TAAConfig::Instance().enabled)
+    {
+        static std::atomic<bool> s_firstDrawIndexed { true };
+        if (s_firstDrawIndexed.exchange(false))
+        {
+            LOG_INFO("[ORDO] First hkDrawIndexedInstanced intercepted! CmdList={:X}, Indices={}, Instances={}",
+                     (size_t) This, IndexCountPerInstance, InstanceCount);
+        }
+        ordo::taa::OnDrawIndexedInstanced(This, IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation, StartInstanceLocation);
+    }
+    // --- [ORDO] END --------------------------
+
     if (!IsHudFixActive())
     {
         LOG_TRACK("Skipping CmdList: {:X}", (size_t) This);
@@ -2387,6 +2488,19 @@ void ResTrack_Dx12::hkDispatch(ID3D12GraphicsCommandList* This, UINT ThreadGroup
                                UINT ThreadGroupCountZ)
 {
     o_Dispatch(This, ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ);
+
+    // --- [ORDO] TAA Dispatch Interceptor ---
+    if (ordo::taa::TAAConfig::Instance().enabled)
+    {
+        static std::atomic<bool> s_firstDispatch { true };
+        if (s_firstDispatch.exchange(false))
+        {
+            LOG_INFO("[ORDO] First hkDispatch intercepted! CmdList={:X}, Groups={}x{}x{}",
+                     (size_t) This, ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ);
+        }
+        ordo::taa::OnDispatch(This, ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ);
+    }
+    // --- [ORDO] END -----------------------
 
     if (!IsHudFixActive())
     {
@@ -2515,7 +2629,8 @@ void ResTrack_Dx12::HookCommandList(ID3D12Device* InDevice)
 
             // Get the vtable pointer
             PVOID* pVTable = *(PVOID**) realCL;
-            const bool persistentBindings = Config::Instance()->FGHudfixPersistentBindings.value_or_default();
+            const bool persistentBindings = Config::Instance()->FGHudfixPersistentBindings.value_or_default() ||
+                                            ordo::taa::TAAConfig::Instance().enabled;
 
             // Persistent command-list binding invalidation
             if (persistentBindings)
@@ -2540,8 +2655,8 @@ void ResTrack_Dx12::HookCommandList(ID3D12Device* InDevice)
                 DetourTransactionBegin();
                 DetourUpdateThread(GetCurrentThread());
 
-                // Only needed for hudfix
-                if (State::Instance().activeFgInput == FGInput::Upscaler)
+                // Needed for hudfix or ORDO TAA
+                if (State::Instance().activeFgInput == FGInput::Upscaler || ordo::taa::TAAConfig::Instance().enabled)
                 {
                     if (o_Reset != nullptr)
                         DetourAttach(&(PVOID&) o_Reset, hkReset);
@@ -2581,9 +2696,11 @@ void ResTrack_Dx12::HookCommandList(ID3D12Device* InDevice)
                     o_Dispatch = nullptr;
                     o_SetComputeRootDescriptorTable = nullptr;
                 }
-                else if (State::Instance().activeFgInput == FGInput::Upscaler)
+                else if (State::Instance().activeFgInput == FGInput::Upscaler || ordo::taa::TAAConfig::Instance().enabled)
                 {
                     _bindingTrackingEnabled.store(persistentBindings, std::memory_order_release);
+                    LOG_INFO("[ORDO] ResTrack_Dx12::HookCommandList: DetourResult={:X}, persistentBindings={}, TAA enabled={}",
+                             (UINT) detourResult, persistentBindings, ordo::taa::TAAConfig::Instance().enabled);
                 }
             }
 
@@ -2696,7 +2813,7 @@ void ResTrack_Dx12::HookDevice(ID3D12Device* device)
             _trackedResources.reserve(1024);
         }
 
-        if (Config::Instance()->FGHudfixPersistentBindings.value_or_default())
+        if (Config::Instance()->FGHudfixPersistentBindings.value_or_default() || ordo::taa::TAAConfig::Instance().enabled)
         {
             if (!_useShards)
             {
@@ -2715,6 +2832,7 @@ void ResTrack_Dx12::HookDevice(ID3D12Device* device)
     }
 
     LOG_FUNC();
+    LOG_INFO("[ORDO] ResTrack_Dx12::HookDevice called for device {:X}", (size_t)device);
 
     ID3D12Device* realDevice = nullptr;
     if (!CheckForRealObject(__FUNCTION__, device, (IUnknown**) &realDevice))
@@ -2728,11 +2846,11 @@ void ResTrack_Dx12::HookDevice(ID3D12Device* device)
     o_CreateShaderResourceView = (PFN_CreateShaderResourceView) pVTable[18];
     o_CreateUnorderedAccessView = (PFN_CreateUnorderedAccessView) pVTable[19];
     o_CreateRenderTargetView = (PFN_CreateRenderTargetView) pVTable[20];
+    o_CreateDepthStencilView = (PFN_CreateDepthStencilView) pVTable[21];
     o_CreateSampler = (PFN_CreateSampler) pVTable[22];
     o_CopyDescriptors = (PFN_CopyDescriptors) pVTable[23];
     o_CopyDescriptorsSimple = (PFN_CopyDescriptorsSimple) pVTable[24];
 
-    // o_CreateDepthStencilView = (PFN_CreateDepthStencilView) pVTable[21];
     // o_CreateConstantBufferView = (PFN_CreateConstantBufferView) pVTable[17];
 
     // Apply the detour
@@ -2747,6 +2865,9 @@ void ResTrack_Dx12::HookDevice(ID3D12Device* device)
 
         if (o_CreateRenderTargetView != nullptr)
             DetourAttach(&(PVOID&) o_CreateRenderTargetView, hkCreateRenderTargetView);
+
+        if (o_CreateDepthStencilView != nullptr)
+            DetourAttach(&(PVOID&) o_CreateDepthStencilView, hkCreateDepthStencilView);
 
         if (o_CreateShaderResourceView != nullptr)
             DetourAttach(&(PVOID&) o_CreateShaderResourceView, hkCreateShaderResourceView);
@@ -2766,6 +2887,7 @@ void ResTrack_Dx12::HookDevice(ID3D12Device* device)
             LOG_ERROR("Failed to hook Descriptor methods: {:X}", detourResult);
             o_CreateDescriptorHeap = nullptr;
             o_CreateRenderTargetView = nullptr;
+            o_CreateDepthStencilView = nullptr;
             o_CreateShaderResourceView = nullptr;
             o_CreateUnorderedAccessView = nullptr;
             o_CopyDescriptors = nullptr;
@@ -2788,6 +2910,9 @@ void ResTrack_Dx12::ReleaseDeviceHooks()
 
     if (o_CreateRenderTargetView != nullptr)
         DetourDetach(&(PVOID&) o_CreateRenderTargetView, hkCreateRenderTargetView);
+
+    if (o_CreateDepthStencilView != nullptr)
+        DetourDetach(&(PVOID&) o_CreateDepthStencilView, hkCreateDepthStencilView);
 
     if (o_CreateShaderResourceView != nullptr)
         DetourDetach(&(PVOID&) o_CreateShaderResourceView, hkCreateShaderResourceView);
@@ -2964,3 +3089,275 @@ void ResTrack_Dx12::ClearPossibleHudless()
         }
     }
 }
+
+// --- [ORDO] Extract bindings for TAA analysis ---
+bool ResTrack_Dx12::GetCurrentBindings(ID3D12GraphicsCommandList* commandList, bool isGraphics,
+                                       std::vector<ResourceInfo>& outSrvs,
+                                       std::vector<ResourceInfo>& outUavs,
+                                       std::vector<ResourceInfo>& outRtvs,
+                                       ResourceInfo* outDsv)
+{
+    outSrvs.clear();
+    outUavs.clear();
+    outRtvs.clear();
+    if (outDsv != nullptr)
+        *outDsv = {};
+
+    if (commandList == nullptr || !_bindingTrackingEnabled.load(std::memory_order_acquire))
+        return false;
+
+    auto* state = FindBindingState(commandList);
+    if (state == nullptr)
+        return false;
+
+    if (isGraphics)
+    {
+        // 1. Render targets
+        for (UINT i = 0; i < state->renderTargetCount; ++i)
+        {
+            if (state->renderTargets[i] != 0)
+            {
+                auto heap = GetHeapByCpuHandleRTV(state->renderTargets[i]);
+                if (heap != nullptr && heap->active.load(std::memory_order_acquire))
+                {
+                    ResourceInfo rtvInfo {};
+                    if (heap->GetByCpuHandle(state->renderTargets[i], rtvInfo) && rtvInfo.buffer != nullptr)
+                    {
+                        rtvInfo.state = D3D12_RESOURCE_STATE_RENDER_TARGET;
+                        outRtvs.push_back(rtvInfo);
+                    }
+                }
+            }
+        }
+
+        // 2. Depth Stencil View
+        if (outDsv != nullptr && state->depthStencil != 0)
+        {
+            auto heap = GetHeapByCpuHandle(state->depthStencil);
+            if (heap != nullptr && heap->active.load(std::memory_order_acquire))
+            {
+                ResourceInfo dsvInfo {};
+                if (heap->GetByCpuHandle(state->depthStencil, dsvInfo) && dsvInfo.buffer != nullptr)
+                {
+                    *outDsv = dsvInfo;
+                }
+            }
+        }
+
+        // 3. Graphics descriptor tables (SRVs & UAVs)
+        auto mask = state->graphicsTableMask;
+        auto rootInfo = state->graphicsRootSignatureInfo.get();
+        if (rootInfo != nullptr)
+        {
+            for (UINT index = 0; mask != 0 && index < CommandListBindingState::MAX_ROOT_PARAMETERS; ++index, mask >>= 1)
+            {
+                if ((mask & 1) == 0)
+                    continue;
+
+                auto baseHandle = state->graphicsTables[index];
+                if (baseHandle == 0)
+                    continue;
+
+                auto* heap = state->cbvSrvUavHeapInfo.get();
+                std::shared_ptr<HeapInfo> fallbackHeap;
+                if (heap == nullptr || !heap->active.load(std::memory_order_acquire) || baseHandle < heap->gpuStart ||
+                    baseHandle >= heap->gpuEnd)
+                {
+                    fallbackHeap = GetHeapByGpuHandleGR(baseHandle);
+                    heap = fallbackHeap.get();
+                }
+                if (heap == nullptr || !heap->active.load(std::memory_order_acquire))
+                    continue;
+
+                UINT baseIndex = 0;
+                if (!heap->GetGpuIndex(baseHandle, baseIndex))
+                    continue;
+
+                const auto& tableInfo = rootInfo->parameters[index];
+                const UINT rangeEnd = tableInfo.firstRange + tableInfo.rangeCount;
+                for (UINT rangeIndex = tableInfo.firstRange; rangeIndex < rangeEnd; ++rangeIndex)
+                {
+                    const auto& range = rootInfo->ranges[rangeIndex];
+                    const uint64_t firstIndex64 = static_cast<uint64_t>(baseIndex) + range.offset;
+                    if (firstIndex64 >= heap->numDescriptors)
+                        continue;
+
+                    const auto firstIndex = static_cast<UINT>(firstIndex64);
+                    const UINT count = (range.count == UINT_MAX) ? 32 : std::min<UINT>(range.count, 64);
+                    for (UINT d = 0; d < count; ++d)
+                    {
+                        if (firstIndex + d >= heap->numDescriptors)
+                            break;
+
+                        ResourceInfo cand {};
+                        if (heap->GetByIndex(firstIndex + d, cand) && cand.buffer != nullptr)
+                        {
+                            if (cand.type == ResourceType::SRV)
+                                outSrvs.push_back(cand);
+                            else if (cand.type == ResourceType::UAV)
+                                outUavs.push_back(cand);
+                        }
+                    }
+                }
+            }
+        }
+        else
+        {
+            // Direct descriptor table scan when root signature reflection info is unavailable
+            for (UINT index = 0; mask != 0 && index < CommandListBindingState::MAX_ROOT_PARAMETERS; ++index, mask >>= 1)
+            {
+                if ((mask & 1) == 0)
+                    continue;
+
+                auto baseHandle = state->graphicsTables[index];
+                if (baseHandle == 0)
+                    continue;
+
+                auto* heap = state->cbvSrvUavHeapInfo.get();
+                std::shared_ptr<HeapInfo> fallbackHeap;
+                if (heap == nullptr || !heap->active.load(std::memory_order_acquire) || baseHandle < heap->gpuStart ||
+                    baseHandle >= heap->gpuEnd)
+                {
+                    fallbackHeap = GetHeapByGpuHandleGR(baseHandle);
+                    heap = fallbackHeap.get();
+                }
+                if (heap == nullptr || !heap->active.load(std::memory_order_acquire))
+                    continue;
+
+                UINT baseIndex = 0;
+                if (!heap->GetGpuIndex(baseHandle, baseIndex))
+                    continue;
+
+                for (UINT d = 0; d < 64; ++d)
+                {
+                    if (baseIndex + d >= heap->numDescriptors)
+                        break;
+
+                    ResourceInfo cand {};
+                    if (heap->GetByIndex(baseIndex + d, cand) && cand.buffer != nullptr)
+                    {
+                        if (cand.type == ResourceType::SRV)
+                            outSrvs.push_back(cand);
+                        else if (cand.type == ResourceType::UAV)
+                            outUavs.push_back(cand);
+                    }
+                }
+            }
+        }
+
+        static std::atomic<int> s_bindDiagCount { 0 };
+        if (s_bindDiagCount.fetch_add(1) < 20)
+        {
+            LOG_INFO("[ORDO] GetCurrentBindings (graphics): rootInfo={}, mask={:X}, RTVs={}, SRVs={}, UAVs={}, DSV={}",
+                     (rootInfo != nullptr), mask, outRtvs.size(), outSrvs.size(), outUavs.size(),
+                     (outDsv != nullptr && outDsv->buffer != nullptr));
+        }
+    }
+    else
+    {
+        // Compute descriptor tables (SRVs & UAVs)
+        auto mask = state->computeTableMask;
+        auto rootInfo = state->computeRootSignatureInfo.get();
+        if (rootInfo != nullptr)
+        {
+            for (UINT index = 0; mask != 0 && index < CommandListBindingState::MAX_ROOT_PARAMETERS; ++index, mask >>= 1)
+            {
+                if ((mask & 1) == 0)
+                    continue;
+
+                auto baseHandle = state->computeTables[index];
+                if (baseHandle == 0)
+                    continue;
+
+                auto* heap = state->cbvSrvUavHeapInfo.get();
+                std::shared_ptr<HeapInfo> fallbackHeap;
+                if (heap == nullptr || !heap->active.load(std::memory_order_acquire) || baseHandle < heap->gpuStart ||
+                    baseHandle >= heap->gpuEnd)
+                {
+                    fallbackHeap = GetHeapByGpuHandleCR(baseHandle);
+                    heap = fallbackHeap.get();
+                }
+                if (heap == nullptr || !heap->active.load(std::memory_order_acquire))
+                    continue;
+
+                UINT baseIndex = 0;
+                if (!heap->GetGpuIndex(baseHandle, baseIndex))
+                    continue;
+
+                const auto& tableInfo = rootInfo->parameters[index];
+                const UINT rangeEnd = tableInfo.firstRange + tableInfo.rangeCount;
+                for (UINT rangeIndex = tableInfo.firstRange; rangeIndex < rangeEnd; ++rangeIndex)
+                {
+                    const auto& range = rootInfo->ranges[rangeIndex];
+                    const uint64_t firstIndex64 = static_cast<uint64_t>(baseIndex) + range.offset;
+                    if (firstIndex64 >= heap->numDescriptors)
+                        continue;
+
+                    const auto firstIndex = static_cast<UINT>(firstIndex64);
+                    const UINT count = (range.count == UINT_MAX) ? 32 : std::min<UINT>(range.count, 64);
+                    for (UINT d = 0; d < count; ++d)
+                    {
+                        if (firstIndex + d >= heap->numDescriptors)
+                            break;
+
+                        ResourceInfo cand {};
+                        if (heap->GetByIndex(firstIndex + d, cand) && cand.buffer != nullptr)
+                        {
+                            if (cand.type == ResourceType::SRV)
+                                outSrvs.push_back(cand);
+                            else if (cand.type == ResourceType::UAV)
+                                outUavs.push_back(cand);
+                        }
+                    }
+                }
+            }
+        }
+        else
+        {
+            // Direct descriptor table scan for compute when root signature reflection info is unavailable
+            for (UINT index = 0; mask != 0 && index < CommandListBindingState::MAX_ROOT_PARAMETERS; ++index, mask >>= 1)
+            {
+                if ((mask & 1) == 0)
+                    continue;
+
+                auto baseHandle = state->computeTables[index];
+                if (baseHandle == 0)
+                    continue;
+
+                auto* heap = state->cbvSrvUavHeapInfo.get();
+                std::shared_ptr<HeapInfo> fallbackHeap;
+                if (heap == nullptr || !heap->active.load(std::memory_order_acquire) || baseHandle < heap->gpuStart ||
+                    baseHandle >= heap->gpuEnd)
+                {
+                    fallbackHeap = GetHeapByGpuHandleCR(baseHandle);
+                    heap = fallbackHeap.get();
+                }
+                if (heap == nullptr || !heap->active.load(std::memory_order_acquire))
+                    continue;
+
+                UINT baseIndex = 0;
+                if (!heap->GetGpuIndex(baseHandle, baseIndex))
+                    continue;
+
+                for (UINT d = 0; d < 64; ++d)
+                {
+                    if (baseIndex + d >= heap->numDescriptors)
+                        break;
+
+                    ResourceInfo cand {};
+                    if (heap->GetByIndex(baseIndex + d, cand) && cand.buffer != nullptr)
+                    {
+                        if (cand.type == ResourceType::SRV)
+                            outSrvs.push_back(cand);
+                        else if (cand.type == ResourceType::UAV)
+                            outUavs.push_back(cand);
+                    }
+                }
+            }
+        }
+    }
+
+    return true;
+}
+// --- [ORDO] END ---
+

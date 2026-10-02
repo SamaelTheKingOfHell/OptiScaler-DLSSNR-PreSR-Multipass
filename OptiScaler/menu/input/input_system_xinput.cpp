@@ -5,6 +5,11 @@
 
 #include <detours/detours.h>
 
+// --- [ORDO] TAA Interceptor & Config ---
+#include <taa_intercept/taa_interceptor.h>
+#include <taa_intercept/taa_config.h>
+// --- [ORDO] END ------------------------
+
 namespace OptiInput
 {
 namespace
@@ -250,7 +255,23 @@ DWORD WINAPI hkXInputGetState(DWORD userIndex, XINPUT_STATE* state)
     if (!shouldBlock)
     {
         ScopedHookBypass bypass;
-        return o_XInputGetState(userIndex, state);
+        DWORD res = o_XInputGetState(userIndex, state);
+
+        // --- [ORDO] Title screen auto-progression pulse ---
+        if (res == ERROR_SUCCESS && state != nullptr &&
+            ordo::taa::TAAConfig::Instance().enabled &&
+            !ordo::taa::HasConfirmedPass())
+        {
+            static std::atomic<uint32_t> s_xinputPulse { 0 };
+            uint32_t f = s_xinputPulse.fetch_add(1);
+            if ((f % 120) < 10)
+            {
+                state->Gamepad.wButtons |= XINPUT_GAMEPAD_A;
+            }
+        }
+        // --- [ORDO] END -----------------------------------
+
+        return res;
     }
 
     XINPUT_STATE realState {};

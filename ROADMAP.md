@@ -18,25 +18,27 @@
       and TAA Interceptor telemetry status.
 - [x] Enable top upscaler selection (DLSS / FSR / XeSS) even when games lack native
       upscaler features (like Elden Ring).
-- [ ] Extend interception to `DrawInstanced` and `DrawIndexedInstanced` for engines
+- [x] Extend interception to `DrawInstanced` and `DrawIndexedInstanced` for engines
       (such as FromSoftware's Dantelion engine) that execute TAA via full-screen
       pixel shader passes instead of compute dispatches.
 
-## Phase 2 — TAA Suppression & Buffer Extraction
-- [ ] Once a TAA pass is confirmed (stable detection across N frames), suppress
-      the original `Dispatch` call.
-- [ ] Extract the SRV resources: current color, history color, motion vectors,
-      depth buffer.
+## Phase 2 — TAA Suppression & Buffer Extraction ← CURRENT
+- [x] Once a TAA pass is confirmed (stable detection across N frames), suppress
+      the original pass when override is enabled.
+- [x] Extract the SRV/RTV resources: current color, motion vectors, depth buffer,
+      and render target output.
 - [ ] Extract jitter offsets from constant buffer data.
-- [ ] Store extracted buffers in `ordo::taa::FrameContext` for the upscaler.
+- [x] Store extracted buffers and feed them to `ordo::taa::TAAInjector`.
 
-## Phase 3 — DLSS SR Injection
-- [ ] Call `NVSDK_NGX_D3D12_CreateFeature` through OptiScaler's existing
-      `FeatureProvider_Dx12` to create a DLSS SR feature instance.
-- [ ] Feed extracted TAA inputs to `NVSDK_NGX_D3D12_EvaluateFeature` on the
+## Phase 3 — Upscaler SR Injection
+- [x] Call `NVSDK_NGX_D3D12_CreateFeature` through OptiScaler's NGX subsystem
+      to create a SuperSampling feature instance.
+- [x] Feed extracted TAA inputs to `NVSDK_NGX_D3D12_EvaluateFeature` on the
       same command list, writing output to the render target the game expects.
-- [ ] Expose quality mode picker (Ultra Performance → DLAA) through the
+- [x] Expose quality mode picker (Ultra Performance → Ultra Quality) through the
       OptiScaler overlay via `[OrdoTAA]` config keys.
+- [x] Strict indicator status enforcement: green `[CONFIRMED WORKING]` only when
+      upscaler feature is actively initialized and evaluating.
 
 ## Phase 4 — Per-Game Profiles
 - [ ] Create a JSON/INI profile database for known TAA signatures.

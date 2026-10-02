@@ -31,6 +31,7 @@
 
 // --- [ORDO] TAA / Forced Upscaling Menu ---
 #include <taa_intercept/taa_menu.h>
+#include <taa_intercept/taa_config.h>
 // --- [ORDO] END ----------------------------
 
 #include <imgui/imgui_internal.h>
@@ -2634,6 +2635,36 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
             ImGui::Spacing();
             ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "nvngx_dlss.dll not found, DLSS disabled!");
         }
+    }
+    else if (ordo::taa::TAAConfig::Instance().enabled || ordo::taa::TAAConfig::Instance().forceUpscaling)
+    {
+        // --- [ORDO] Upscalers Section (Forced Injection Mode) ---
+        ImGui::SeparatorText("Upscalers (Forced Injection Mode)");
+        ShowTooltip("Select upscaler backend for forced TAA interception.");
+
+        ImGui::PushItemWidth(180.0f * menuResScale);
+        ImGui::Text(primaryGpu.name.c_str());
+        ImGui::Text("D3D12 %s| Forced Injection (No Native DLSS)", primaryGpu.usesDxvk ? "(DXVK) " : "");
+
+        Upscaler currentBackend = config->Dx12Upscaler.value_or(Upscaler::FSR22);
+        AddDx12Backends(currentBackend);
+        ImGui::PopItemWidth();
+
+        ImGui::SameLine(0.0f, 6.0f);
+        if (ImGui::Button("Change Upscaler##ordo") && state.newBackend != Upscaler::Reset &&
+            state.newBackend != currentBackend)
+        {
+            config->Dx12Upscaler = state.newBackend;
+            config->SaveIni();
+            LOG_INFO("[ORDO] DX12 forced upscaler changed to: {}", (int)state.newBackend);
+        }
+
+        if (primaryGpu.dlssCapable && !state.NVNGX_DLSS_Path.has_value())
+        {
+            ImGui::Spacing();
+            ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "nvngx_dlss.dll not found, DLSS disabled!");
+        }
+        // --- [ORDO] END -----------------------------------------
     }
 
     if (currentFeature != nullptr && !currentFeature->IsFrozen())

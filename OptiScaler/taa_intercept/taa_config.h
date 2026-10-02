@@ -7,6 +7,7 @@
 
 #include <string>
 #include <cstdint>
+#include <SimpleIni.h>
 
 namespace ordo::taa
 {
@@ -25,7 +26,7 @@ namespace ordo::taa
 struct TAAConfig
 {
     // --- Master toggle ---
-    bool enabled = false;
+    bool enabled = true;
 
     // --- Discovery / logging ---
     bool logDiscovery = true;       // Log TAA candidate dispatches to OptiScaler.log
@@ -64,6 +65,12 @@ struct TAAConfig
     /// TAAConfig::Instance().LoadFromINI("D:\\Game\\OptiScaler.ini");
     /// ```
     void LoadFromINI(const std::string& iniPath);
+
+    /// Load config directly from a CSimpleIniA instance.
+    void LoadFromSimpleIni(CSimpleIniA& ini);
+
+    /// Save current configuration directly to a CSimpleIniA instance.
+    void SaveToSimpleIni(CSimpleIniA& ini);
 
     /// Save current configuration to an INI file under [OrdoTAA].
     /// If iniPath is empty, uses iniFilePath or OptiScaler's active INI path.

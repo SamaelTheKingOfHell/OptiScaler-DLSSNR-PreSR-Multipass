@@ -109,7 +109,33 @@ float TAADetector::ScoreMotionVectors(const DispatchSnapshot& snapshot, Detectio
 
 float TAADetector::ScoreColorBuffers(const DispatchSnapshot& snapshot, DetectionResult& result) const
 {
-    // TAA needs at least 2 color-format SRVs (current + history) with matching dimensions
+    if (snapshot.isRaster)
+    {
+        // For raster passes, output is an RTV and input is an SRV
+        if (!snapshot.rtvs.empty() && IsColorFormat(snapshot.rtvs[0].format))
+        {
+            const auto& rtv = snapshot.rtvs[0];
+            for (int i = 0; i < static_cast<int>(snapshot.srvs.size()); i++)
+            {
+                const auto& srv = snapshot.srvs[i];
+                if (IsColorFormat(srv.format))
+                {
+                    result.colorInputIndex = i;
+                    result.outputIndex = 0;
+                    result.inferredWidth = static_cast<uint32_t>(rtv.width);
+                    result.inferredHeight = rtv.height;
+
+                    if (srv.width == rtv.width && srv.height == rtv.height)
+                        return 0.30f; // Dimensions match exactly
+
+                    return 0.20f;
+                }
+            }
+        }
+        return 0.0f;
+    }
+
+    // TAA compute needs at least 2 color-format SRVs (current + history) or 1 color SRV + 1 color UAV
     std::vector<int> colorIndices;
 
     for (int i = 0; i < static_cast<int>(snapshot.srvs.size()); i++)
@@ -119,7 +145,17 @@ float TAADetector::ScoreColorBuffers(const DispatchSnapshot& snapshot, Detection
     }
 
     if (colorIndices.size() < 2)
+    {
+        if (colorIndices.size() == 1 && !snapshot.uavs.empty() && IsColorFormat(snapshot.uavs[0].format))
+        {
+            result.colorInputIndex = colorIndices[0];
+            result.outputIndex = 0;
+            result.inferredWidth = static_cast<uint32_t>(snapshot.uavs[0].width);
+            result.inferredHeight = snapshot.uavs[0].height;
+            return 0.25f;
+        }
         return 0.0f;
+    }
 
     // Look for a pair with matching dimensions (ping-pong pattern)
     for (size_t a = 0; a < colorIndices.size(); a++)
@@ -135,7 +171,7 @@ float TAADetector::ScoreColorBuffers(const DispatchSnapshot& snapshot, Detection
                 result.colorHistoryIndex = colorIndices[b];
                 result.inferredWidth = static_cast<uint32_t>(srvA.width);
                 result.inferredHeight = srvA.height;
-                return 0.25f; // Matching ping-pong pair found
+                return 0.30f; // Matching ping-pong pair found
             }
         }
     }
@@ -144,7 +180,7 @@ float TAADetector::ScoreColorBuffers(const DispatchSnapshot& snapshot, Detection
     result.colorInputIndex = colorIndices[0];
     if (colorIndices.size() > 1)
         result.colorHistoryIndex = colorIndices[1];
-    return 0.10f;
+    return 0.15f;
 }
 
 float TAADetector::ScoreDepthBuffer(const DispatchSnapshot& snapshot, DetectionResult& result) const
@@ -154,9 +190,17 @@ float TAADetector::ScoreDepthBuffer(const DispatchSnapshot& snapshot, DetectionR
         if (IsDepthFormat(snapshot.srvs[i].format))
         {
             result.depthIndex = i;
-            return 0.15f;
+            return 0.20f;
         }
     }
+
+    // For raster draws, depth may be bound as DSV
+    if (snapshot.isRaster && snapshot.dsv.resource != nullptr)
+    {
+        result.depthIndex = -2; // Signal DSV depth
+        return 0.20f;
+    }
+
     return 0.0f;
 }
 
@@ -164,46 +208,68 @@ float TAADetector::ScoreDispatchDimensions(const DispatchSnapshot& snapshot, Det
 {
     const auto& config = TAAConfig::Instance();
 
-    // TAA typically dispatches with 8x8 thread groups covering the full render resolution
-    // So dispatch dimensions ~= (width+7)/8, (height+7)/8
+    if (snapshot.isRaster)
+    {
+        // Raster full-screen pass: full-screen triangle (3) or quad (4 or 6)
+        bool isFullscreenPrimitive = (snapshot.vertexCount == 3 || snapshot.vertexCount == 4 || snapshot.indexCount == 6);
+        if (!isFullscreenPrimitive)
+            return 0.0f;
+
+        if (!snapshot.rtvs.empty())
+        {
+            uint32_t rtw = static_cast<uint32_t>(snapshot.rtvs[0].width);
+            uint32_t rth = snapshot.rtvs[0].height;
+
+            if (rtw >= config.minDispatchWidth && rth >= config.minDispatchHeight)
+            {
+                result.inferredWidth = rtw;
+                result.inferredHeight = rth;
+                return 0.20f; // Full-screen raster draw
+            }
+        }
+        return 0.05f;
+    }
+
+    // Compute pass dimensions
     uint32_t inferredW = snapshot.threadGroupCountX * 8;
     uint32_t inferredH = snapshot.threadGroupCountY * 8;
 
-    // Too small to be a meaningful TAA pass
     if (inferredW < config.minDispatchWidth || inferredH < config.minDispatchHeight)
         return 0.0f;
 
-    // Z must be 1 for a 2D full-screen pass
     if (snapshot.threadGroupCountZ != 1)
         return 0.0f;
 
-    // If we inferred dimensions from color buffers, check consistency
     if (result.inferredWidth > 0 && result.inferredHeight > 0)
     {
-        // The dispatch should cover the render resolution (within 8-pixel rounding)
         int32_t diffW = static_cast<int32_t>(inferredW) - static_cast<int32_t>(result.inferredWidth);
         int32_t diffH = static_cast<int32_t>(inferredH) - static_cast<int32_t>(result.inferredHeight);
 
         if (std::abs(diffW) <= 8 && std::abs(diffH) <= 8)
-            return 0.20f; // Dimensions match the color buffers
+            return 0.20f;
     }
     else
     {
-        // No color buffer reference, but reasonable full-screen dispatch
         result.inferredWidth = inferredW;
         result.inferredHeight = inferredH;
     }
 
-    return 0.10f; // Reasonable dimensions but no buffer correlation
+    return 0.10f;
 }
 
 float TAADetector::ScoreResourceCount(const DispatchSnapshot& snapshot) const
 {
-    // TAA typically binds 3-6 SRVs and 1-2 UAVs
+    if (snapshot.isRaster)
+    {
+        if (snapshot.srvs.size() >= 2 && !snapshot.rtvs.empty())
+            return 0.05f;
+        return 0.0f;
+    }
+
     auto srvCount = snapshot.srvs.size();
     auto uavCount = snapshot.uavs.size();
 
-    if (srvCount >= 3 && srvCount <= 8 && uavCount >= 1 && uavCount <= 3)
+    if (srvCount >= 2 && srvCount <= 8 && uavCount >= 1 && uavCount <= 4)
         return 0.05f;
 
     return 0.0f;
@@ -214,6 +280,7 @@ float TAADetector::ScoreResourceCount(const DispatchSnapshot& snapshot) const
 DetectionResult TAADetector::ScoreDispatch(const DispatchSnapshot& snapshot) const
 {
     DetectionResult result {};
+    result.isRaster = snapshot.isRaster;
 
     // Accumulate sub-scores (weights sum to ~1.0)
     result.score += ScoreMotionVectors(snapshot, result);
@@ -222,14 +289,22 @@ DetectionResult TAADetector::ScoreDispatch(const DispatchSnapshot& snapshot) con
     result.score += ScoreDispatchDimensions(snapshot, result);
     result.score += ScoreResourceCount(snapshot);
 
-    // Find the output UAV (first UAV with color format matching render dims)
-    for (int i = 0; i < static_cast<int>(snapshot.uavs.size()); i++)
+    if (snapshot.isRaster)
     {
-        const auto& uav = snapshot.uavs[i];
-        if (IsColorFormat(uav.format))
+        if (!snapshot.rtvs.empty())
+            result.outputIndex = 0;
+    }
+    else
+    {
+        // Find the output UAV (first UAV with color format matching render dims)
+        for (int i = 0; i < static_cast<int>(snapshot.uavs.size()); i++)
         {
-            result.outputIndex = i;
-            break;
+            const auto& uav = snapshot.uavs[i];
+            if (IsColorFormat(uav.format))
+            {
+                result.outputIndex = i;
+                break;
+            }
         }
     }
 
@@ -300,13 +375,47 @@ void TAADetector::TrackCandidate(const DispatchSnapshot& snapshot, const Detecti
 
     if (TAAConfig::Instance().logDiscovery)
     {
-        LOG_INFO("[ORDO] New TAA candidate: Pipeline={:X}, Score={:.2f}, "
-                 "SRVs={}, UAVs={}, Dispatch={}x{}x{}, InferredRes={}x{}",
-                 reinterpret_cast<uintptr_t>(snapshot.pipelineState),
-                 result.score,
-                 snapshot.srvs.size(), snapshot.uavs.size(),
-                 snapshot.threadGroupCountX, snapshot.threadGroupCountY, snapshot.threadGroupCountZ,
-                 result.inferredWidth, result.inferredHeight);
+        if (snapshot.isRaster)
+        {
+            LOG_INFO("[ORDO] New TAA candidate [RASTER DRAW]: Pipeline={:X}, Score={:.2f}, "
+                     "Verts={}, SRVs={}, RTVs={}, InferredRes={}x{}",
+                     reinterpret_cast<uintptr_t>(snapshot.pipelineState),
+                     result.score,
+                     snapshot.vertexCount ? snapshot.vertexCount : snapshot.indexCount,
+                     snapshot.srvs.size(), snapshot.rtvs.size(),
+                     result.inferredWidth, result.inferredHeight);
+
+            for (size_t i = 0; i < snapshot.rtvs.size(); i++)
+            {
+                const auto& rtv = snapshot.rtvs[i];
+                LOG_INFO("[ORDO]   RTV[{}]: {}x{} fmt={} [OUTPUT]", i, rtv.width, rtv.height,
+                         static_cast<uint32_t>(rtv.format));
+            }
+
+            if (snapshot.dsv.resource != nullptr)
+            {
+                LOG_INFO("[ORDO]   DSV: {}x{} fmt={} [DEPTH]", snapshot.dsv.width, snapshot.dsv.height,
+                         static_cast<uint32_t>(snapshot.dsv.format));
+            }
+        }
+        else
+        {
+            LOG_INFO("[ORDO] New TAA candidate [COMPUTE DISPATCH]: Pipeline={:X}, Score={:.2f}, "
+                     "SRVs={}, UAVs={}, Dispatch={}x{}x{}, InferredRes={}x{}",
+                     reinterpret_cast<uintptr_t>(snapshot.pipelineState),
+                     result.score,
+                     snapshot.srvs.size(), snapshot.uavs.size(),
+                     snapshot.threadGroupCountX, snapshot.threadGroupCountY, snapshot.threadGroupCountZ,
+                     result.inferredWidth, result.inferredHeight);
+
+            for (size_t i = 0; i < snapshot.uavs.size(); i++)
+            {
+                const auto& uav = snapshot.uavs[i];
+                const char* role = (static_cast<int>(i) == result.outputIndex) ? " [OUTPUT]" : "";
+                LOG_INFO("[ORDO]   UAV[{}]: {}x{} fmt={}{}", i, uav.width, uav.height,
+                         static_cast<uint32_t>(uav.format), role);
+            }
+        }
 
         // Log resource details
         for (size_t i = 0; i < snapshot.srvs.size(); i++)
@@ -320,14 +429,6 @@ void TAADetector::TrackCandidate(const DispatchSnapshot& snapshot, const Detecti
 
             LOG_INFO("[ORDO]   SRV[{}]: {}x{} fmt={}{}", i, srv.width, srv.height,
                      static_cast<uint32_t>(srv.format), role);
-        }
-
-        for (size_t i = 0; i < snapshot.uavs.size(); i++)
-        {
-            const auto& uav = snapshot.uavs[i];
-            const char* role = (static_cast<int>(i) == result.outputIndex) ? " [OUTPUT]" : "";
-            LOG_INFO("[ORDO]   UAV[{}]: {}x{} fmt={}{}", i, uav.width, uav.height,
-                     static_cast<uint32_t>(uav.format), role);
         }
     }
 
@@ -350,6 +451,14 @@ const CandidateTracker& TAADetector::GetConfirmedPass() const
 {
     std::lock_guard<std::mutex> lock(_mutex);
     return _candidates[_confirmedIndex];
+}
+
+bool TAADetector::IsConfirmedPass(const DispatchSnapshot& snapshot) const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_confirmedIndex < 0 || _confirmedIndex >= static_cast<int>(_candidates.size()))
+        return false;
+    return _candidates[_confirmedIndex].pipelineState == snapshot.pipelineState;
 }
 
 void TAADetector::Reset()

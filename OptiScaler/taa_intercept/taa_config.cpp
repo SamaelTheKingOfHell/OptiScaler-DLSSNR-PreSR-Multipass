@@ -171,19 +171,51 @@ float TAAConfig::QualityModeRatio(uint32_t mode)
     }
 }
 
+void TAAConfig::LoadFromSimpleIni(CSimpleIniA& ini)
+{
+    enabled = ini.GetBoolValue("OrdoTAA", "Enabled", enabled);
+    forceUpscaling = ini.GetBoolValue("OrdoTAA", "ForceUpscaling", forceUpscaling);
+    qualityMode = static_cast<uint32_t>(ini.GetLongValue("OrdoTAA", "QualityMode", static_cast<long>(qualityMode)));
+    customScaleRatio = static_cast<float>(ini.GetDoubleValue("OrdoTAA", "CustomScaleRatio", static_cast<double>(customScaleRatio)));
+    logDiscovery = ini.GetBoolValue("OrdoTAA", "LogDiscovery", logDiscovery);
+    logPerFrame = ini.GetBoolValue("OrdoTAA", "LogPerFrame", logPerFrame);
+    confirmFrames = static_cast<uint32_t>(ini.GetLongValue("OrdoTAA", "ConfirmFrames", static_cast<long>(confirmFrames)));
+    minDispatchWidth = static_cast<uint32_t>(ini.GetLongValue("OrdoTAA", "MinDispatchWidth", static_cast<long>(minDispatchWidth)));
+    minDispatchHeight = static_cast<uint32_t>(ini.GetLongValue("OrdoTAA", "MinDispatchHeight", static_cast<long>(minDispatchHeight)));
+    motionVectorFormat = static_cast<uint32_t>(ini.GetLongValue("OrdoTAA", "MotionVectorFormat", static_cast<long>(motionVectorFormat)));
+    const char* prof = ini.GetValue("OrdoTAA", "Profile", nullptr);
+    if (prof != nullptr)
+        profileName = prof;
+
+    LOG_INFO("[ORDO] TAAConfig loaded from SimpleIni: Enabled={}, ForceUpscaling={}, QualityMode={}({}), ConfirmFrames={}, Profile='{}'",
+             enabled, forceUpscaling, qualityMode, QualityModeName(qualityMode), confirmFrames, profileName);
+}
+
+void TAAConfig::SaveToSimpleIni(CSimpleIniA& ini)
+{
+    ini.SetBoolValue("OrdoTAA", "Enabled", enabled);
+    ini.SetBoolValue("OrdoTAA", "ForceUpscaling", forceUpscaling);
+    ini.SetLongValue("OrdoTAA", "QualityMode", static_cast<long>(qualityMode));
+    ini.SetDoubleValue("OrdoTAA", "CustomScaleRatio", static_cast<double>(customScaleRatio));
+    ini.SetBoolValue("OrdoTAA", "LogDiscovery", logDiscovery);
+    ini.SetBoolValue("OrdoTAA", "LogPerFrame", logPerFrame);
+    ini.SetLongValue("OrdoTAA", "ConfirmFrames", static_cast<long>(confirmFrames));
+    ini.SetLongValue("OrdoTAA", "MinDispatchWidth", static_cast<long>(minDispatchWidth));
+    ini.SetLongValue("OrdoTAA", "MinDispatchHeight", static_cast<long>(minDispatchHeight));
+    ini.SetLongValue("OrdoTAA", "MotionVectorFormat", static_cast<long>(motionVectorFormat));
+    if (!profileName.empty())
+        ini.SetValue("OrdoTAA", "Profile", profileName.c_str());
+}
+
 bool TAAConfig::SaveToINI(const std::string& iniPath)
 {
-    std::string targetPath = iniPath.empty() ? iniFilePath : iniPath;
-    if (targetPath.empty())
+    // If Config::Instance() is available, save through it to ensure atomic INI persistence
+    if (Config::Instance() != nullptr)
     {
-        if (Config::Instance() != nullptr)
-        {
-            auto p = Config::Instance()->AbsoluteFileName();
-            if (!p.empty())
-                targetPath = p.string();
-        }
+        return Config::Instance()->SaveIni();
     }
 
+    std::string targetPath = iniPath.empty() ? iniFilePath : iniPath;
     if (targetPath.empty())
     {
         targetPath = (Util::DllPath().parent_path() / L"OptiScaler.ini").string();
@@ -198,24 +230,9 @@ bool TAAConfig::SaveToINI(const std::string& iniPath)
     CSimpleIniA ini;
     ini.SetUnicode();
     // Load existing INI file so all comments and existing sections are preserved
-    if (ini.LoadFile(targetPath.c_str()) < 0)
-    {
-        LOG_WARN("[ORDO] TAAConfig::SaveToINI: Could not load INI file at {}", targetPath);
-        return false;
-    }
+    ini.LoadFile(targetPath.c_str());
 
-    ini.SetBoolValue("OrdoTAA", "Enabled", enabled);
-    ini.SetBoolValue("OrdoTAA", "ForceUpscaling", forceUpscaling);
-    ini.SetLongValue("OrdoTAA", "QualityMode", static_cast<long>(qualityMode));
-    ini.SetDoubleValue("OrdoTAA", "CustomScaleRatio", static_cast<double>(customScaleRatio));
-    ini.SetBoolValue("OrdoTAA", "LogDiscovery", logDiscovery);
-    ini.SetBoolValue("OrdoTAA", "LogPerFrame", logPerFrame);
-    ini.SetLongValue("OrdoTAA", "ConfirmFrames", static_cast<long>(confirmFrames));
-    ini.SetLongValue("OrdoTAA", "MinDispatchWidth", static_cast<long>(minDispatchWidth));
-    ini.SetLongValue("OrdoTAA", "MinDispatchHeight", static_cast<long>(minDispatchHeight));
-    ini.SetLongValue("OrdoTAA", "MotionVectorFormat", static_cast<long>(motionVectorFormat));
-    if (!profileName.empty())
-        ini.SetValue("OrdoTAA", "Profile", profileName.c_str());
+    SaveToSimpleIni(ini);
 
     if (ini.SaveFile(targetPath.c_str()) >= 0)
     {

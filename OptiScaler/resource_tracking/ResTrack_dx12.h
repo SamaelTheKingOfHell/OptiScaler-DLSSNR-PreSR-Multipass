@@ -4,6 +4,7 @@
 
 #include <hudfix/Hudfix_Dx12.h>
 #include <framegen/IFGFeature_Dx12.h>
+#include <taa_intercept/taa_config.h>
 
 #include <ankerl/unordered_dense.h>
 
@@ -318,8 +319,16 @@ struct HeapInfo : public std::enable_shared_from_this<HeapInfo>
         auto it = _trackedResources.find(newResource);
         if (it == _trackedResources.end())
         {
-            info[index].buffer = nullptr;
-            return;
+            if (ordo::taa::TAAConfig::Instance().enabled)
+            {
+                _trackedResources.try_emplace(newResource);
+                it = _trackedResources.find(newResource);
+            }
+            else
+            {
+                info[index].buffer = nullptr;
+                return;
+            }
         }
 
         auto& vec = it->second;
@@ -552,6 +561,7 @@ struct CommandListBindingState
     std::array<SIZE_T, D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT> renderTargets {};
     UINT renderTargetCount = 0;
     bool renderTargetsContiguous = false;
+    SIZE_T depthStencil = 0;
 
     ID3D12RootSignature* graphicsRootSignature = nullptr;
     ID3D12RootSignature* computeRootSignature = nullptr;
@@ -694,6 +704,9 @@ class ResTrack_Dx12
     static void hkCreateUnorderedAccessView(ID3D12Device* This, ID3D12Resource* pResource,
                                             ID3D12Resource* pCounterResource, D3D12_UNORDERED_ACCESS_VIEW_DESC* pDesc,
                                             D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor);
+    static void hkCreateDepthStencilView(ID3D12Device* This, ID3D12Resource* pResource,
+                                         D3D12_DEPTH_STENCIL_VIEW_DESC* pDesc,
+                                         D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor);
 
     static HRESULT hkCreateDescriptorHeap(ID3D12Device* This, D3D12_DESCRIPTOR_HEAP_DESC* pDescriptorHeapDesc,
                                           REFIID riid, void** ppvHeap);
@@ -722,9 +735,14 @@ class ResTrack_Dx12
     static std::shared_ptr<HeapInfo> GetHeapByCpuHandle(SIZE_T cpuHandle);
     static std::shared_ptr<HeapInfo> GetHeapByGpuHandleGR(SIZE_T gpuHandle);
 
-// --- [ORDO] Expose heap lookup for TAA interceptor ---
+// --- [ORDO] Expose heap lookup and binding extraction for TAA interceptor ---
   public:
     static std::shared_ptr<HeapInfo> GetHeapByGpuHandleCR(SIZE_T gpuHandle);
+    static bool GetCurrentBindings(ID3D12GraphicsCommandList* commandList, bool isGraphics,
+                                   std::vector<ResourceInfo>& outSrvs,
+                                   std::vector<ResourceInfo>& outUavs,
+                                   std::vector<ResourceInfo>& outRtvs,
+                                   ResourceInfo* outDsv = nullptr);
   private:
 // --- [ORDO] END -------------------------------------
 

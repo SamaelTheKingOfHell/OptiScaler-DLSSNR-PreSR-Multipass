@@ -60,6 +60,10 @@ bool Config::Reload(std::filesystem::path iniPath)
         State::Instance().nvngxIniDetected = exists(iniPath.parent_path() / "nvngx.ini");
         _log.clear();
 
+        // --- [ORDO] Load TAA settings ---
+        ordo::taa::TAAConfig::Instance().LoadFromSimpleIni(ini);
+        // --- [ORDO] END -----------------
+
         // Upscalers
         {
             // transform converts only when optional has a value
@@ -984,6 +988,10 @@ bool Config::SaveIni(std::filesystem::path destination)
         SaveUpscaler("Dx12Upscaler", Instance()->Dx12Upscaler);
         SaveUpscaler("VulkanUpscaler", Instance()->VulkanUpscaler);
     }
+
+    // --- [ORDO] Save TAA / Forced Upscaling settings ---
+    ordo::taa::TAAConfig::Instance().SaveToSimpleIni(ini);
+    // --- [ORDO] END -------------------------------------
 
     // Frame Generation
     {

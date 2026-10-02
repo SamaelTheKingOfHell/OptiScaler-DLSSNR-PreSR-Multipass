@@ -40,6 +40,19 @@ void Shutdown();
 bool OnDispatch(ID3D12GraphicsCommandList* commandList,
                 UINT threadGroupCountX, UINT threadGroupCountY, UINT threadGroupCountZ);
 
+/// Called by the hooked DrawInstanced function.
+/// Analyzes raster draw calls for full-screen TAA passes (3 or 4 vertices).
+bool OnDrawInstanced(ID3D12GraphicsCommandList* commandList,
+                     UINT vertexCountPerInstance, UINT instanceCount,
+                     UINT startVertexLocation, UINT startInstanceLocation);
+
+/// Called by the hooked DrawIndexedInstanced function.
+/// Analyzes raster indexed draw calls for full-screen TAA passes (6 indices).
+bool OnDrawIndexedInstanced(ID3D12GraphicsCommandList* commandList,
+                            UINT indexCountPerInstance, UINT instanceCount,
+                            UINT startIndexLocation, INT baseVertexLocation,
+                            UINT startInstanceLocation);
+
 /// Called once per present to advance the frame counter.
 /// ```cpp
 /// ordo::taa::OnPresent();

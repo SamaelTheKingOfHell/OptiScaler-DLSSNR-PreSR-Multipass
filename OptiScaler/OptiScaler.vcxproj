@@ -649,6 +649,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="taa_intercept\taa_interceptor.h" />
     <ClInclude Include="taa_intercept\taa_profiles.h" />
     <ClInclude Include="taa_intercept\taa_menu.h" />
+    <ClInclude Include="taa_intercept\taa_injector.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="framegen\nvngx\Nvngx_Combo.cpp" />
@@ -915,6 +916,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="taa_intercept\taa_interceptor.cpp" />
     <ClCompile Include="taa_intercept\taa_profiles.cpp" />
     <ClCompile Include="taa_intercept\taa_menu.cpp" />
+    <ClCompile Include="taa_intercept\taa_injector.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="OptiScaler.rc">

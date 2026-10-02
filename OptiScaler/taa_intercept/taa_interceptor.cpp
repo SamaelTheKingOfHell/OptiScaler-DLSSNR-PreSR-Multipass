@@ -4,6 +4,7 @@
 #include "taa_detector.h"
 #include "taa_frame_context.h"
 #include "taa_profiles.h"
+#include "taa_injector.h"
 
 #include <Config.h>
 #include <State.h>
@@ -57,88 +58,75 @@ static bool TryResolveDescriptor(D3D12_GPU_DESCRIPTOR_HANDLE gpuHandle, Resource
     return false;
 }
 
-/// Build a DispatchSnapshot from the tracked resources.
-/// Uses OptiScaler's tracked descriptor heaps and resource tracking.
-///
-/// ```cpp
-/// DispatchSnapshot snap;
-/// BuildSnapshot(cmdList, 240, 135, 1, snap);
-/// ```
+// --- Resource extraction helpers ---
+
+/// Build a DispatchSnapshot from the tracked resources on the command list.
 static void BuildSnapshot(ID3D12GraphicsCommandList* cmdList,
-                          UINT tgX, UINT tgY, UINT tgZ,
+                          bool isRaster,
+                          UINT paramA, UINT paramB, UINT paramC,
                           DispatchSnapshot& snap)
 {
-    snap.threadGroupCountX = tgX;
-    snap.threadGroupCountY = tgY;
-    snap.threadGroupCountZ = tgZ;
-    snap.srvs.clear();
-    snap.uavs.clear();
+    snap = {};
+    snap.isRaster = isRaster;
 
-    const uint64_t currentFrame = s_frameCounter.load(std::memory_order_relaxed);
-
-    std::scoped_lock lock(_trackedResourcesMutex);
-    for (const auto& [resource, slots] : _trackedResources)
+    if (isRaster)
     {
-        if (resource == nullptr || slots.empty())
-            continue;
+        snap.vertexCount = paramA;
+        snap.indexCount = paramB;
+        snap.instanceCount = paramC;
+    }
+    else
+    {
+        snap.threadGroupCountX = paramA;
+        snap.threadGroupCountY = paramB;
+        snap.threadGroupCountZ = paramC;
+    }
 
-        for (const auto& slot : slots)
+    std::vector<ResourceInfo> srvs, uavs, rtvs;
+    ResourceInfo dsvInfo {};
+
+    if (ResTrack_Dx12::GetCurrentBindings(cmdList, isRaster, srvs, uavs, rtvs, &dsvInfo))
+    {
+        for (const auto& r : srvs)
         {
-            auto heap = slot.heap.lock();
-            if (!heap || !heap->active.load(std::memory_order_acquire))
-                continue;
-
-            SIZE_T gpuHandle = heap->gpuStart + static_cast<SIZE_T>(slot.index) * heap->increment;
-            ResourceInfo info {};
-            if (heap->GetByGpuHandle(gpuHandle, info) && info.buffer != nullptr)
-            {
-                BoundResource bound;
-                bound.resource = info.buffer;
-                bound.format = info.format;
-                bound.width = info.width;
-                bound.height = info.height;
-                bound.type = info.type;
-
-                if (info.type == ResourceType::SRV)
-                    snap.srvs.push_back(bound);
-                else if (info.type == ResourceType::UAV)
-                    snap.uavs.push_back(bound);
-
-                break;
-            }
+            BoundResource b;
+            b.resource = r.buffer;
+            b.format = r.format;
+            b.width = r.width;
+            b.height = r.height;
+            b.type = ResourceType::SRV;
+            snap.srvs.push_back(b);
         }
-    }
-}
 
-// --- Dispatch hook ---
+        for (const auto& r : uavs)
+        {
+            BoundResource b;
+            b.resource = r.buffer;
+            b.format = r.format;
+            b.width = r.width;
+            b.height = r.height;
+            b.type = ResourceType::UAV;
+            snap.uavs.push_back(b);
+        }
 
-/// The hooked Dispatch function. Called for every compute dispatch in the game.
-/// We analyze the dispatch, score it, and if configured, suppress confirmed
-/// TAA passes.
-static void STDMETHODCALLTYPE hkDispatch(ID3D12GraphicsCommandList* cmdList,
-                                          UINT ThreadGroupCountX,
-                                          UINT ThreadGroupCountY,
-                                          UINT ThreadGroupCountZ)
-{
-    static std::atomic<uint32_t> s_totalDispatches { 0 };
-    uint32_t total = s_totalDispatches.fetch_add(1);
+        for (const auto& r : rtvs)
+        {
+            BoundResource b;
+            b.resource = r.buffer;
+            b.format = r.format;
+            b.width = r.width;
+            b.height = r.height;
+            b.type = ResourceType::RTV;
+            snap.rtvs.push_back(b);
+        }
 
-    if (total < 10 || (total % 1000 == 0))
-    {
-        LOG_INFO("[ORDO] hkDispatch #{} called: {}x{}x{}", total, ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ);
-    }
-
-    bool intercepted = false;
-
-    if (s_initialized.load(std::memory_order_acquire) &&
-        TAAConfig::Instance().enabled)
-    {
-        intercepted = OnDispatch(cmdList, ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ);
-    }
-
-    if (o_Dispatch)
-    {
-        o_Dispatch(cmdList, ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ);
+        if (dsvInfo.buffer != nullptr)
+        {
+            snap.dsv.resource = dsvInfo.buffer;
+            snap.dsv.format = dsvInfo.format;
+            snap.dsv.width = dsvInfo.width;
+            snap.dsv.height = dsvInfo.height;
+        }
     }
 }
 
@@ -174,50 +162,18 @@ void Initialize(ID3D12Device* device, ID3D12GraphicsCommandList* commandList)
 
     TAAConfig::Instance().LoadFromINI(iniPath);
 
+    TAAInjector::Instance().Initialize(device);
+
     if (!TAAConfig::Instance().enabled)
     {
-        LOG_INFO("[ORDO] TAA interception is DISABLED. Set [OrdoTAA] Enabled=true to activate.");
-        s_initialized.store(false);
-        return;
+        LOG_INFO("[ORDO] TAA interception is currently inactive in INI. Standing by for activation.");
     }
 
     // Load game profile if available
     TAAProfiles::Instance().LoadProfiles();
     TAAProfiles::Instance().AutoDetectGame();
 
-    // Hook Dispatch on the command list vtable
-    if (commandList != nullptr)
-    {
-        PVOID* pVTable = *(PVOID**)commandList;
-        o_Dispatch = (PFN_Dispatch)pVTable[14]; // Dispatch = vtable index 14
-
-        if (o_Dispatch != nullptr)
-        {
-            DetourTransactionBegin();
-            DetourUpdateThread(GetCurrentThread());
-            DetourAttach(&(PVOID&)o_Dispatch, hkDispatch);
-
-            if (DetourTransactionCommit() == NO_ERROR)
-            {
-                LOG_INFO("[ORDO] Dispatch hook installed successfully");
-            }
-            else
-            {
-                LOG_ERROR("[ORDO] Failed to install Dispatch hook");
-                o_Dispatch = nullptr;
-                s_initialized.store(false);
-                return;
-            }
-        }
-        else
-        {
-            LOG_ERROR("[ORDO] Could not find Dispatch in command list vtable");
-            s_initialized.store(false);
-            return;
-        }
-    }
-
-    LOG_INFO("[ORDO] TAA Interceptor initialized. Monitoring compute dispatches...");
+    LOG_INFO("[ORDO] TAA Interceptor initialized. Monitoring compute dispatches and raster passes...");
 }
 
 void Shutdown()
@@ -225,17 +181,7 @@ void Shutdown()
     if (!s_initialized.exchange(false))
         return;
 
-    // Unhook Dispatch
-    if (o_Dispatch != nullptr)
-    {
-        DetourTransactionBegin();
-        DetourUpdateThread(GetCurrentThread());
-        DetourDetach(&(PVOID&)o_Dispatch, hkDispatch);
-        DetourTransactionCommit();
-        o_Dispatch = nullptr;
-        LOG_INFO("[ORDO] Dispatch hook removed");
-    }
-
+    TAAInjector::Instance().Shutdown();
     s_detector.Reset();
     s_frameContext.Reset();
     s_device = nullptr;
@@ -246,6 +192,9 @@ void Shutdown()
 bool OnDispatch(ID3D12GraphicsCommandList* commandList,
                 UINT threadGroupCountX, UINT threadGroupCountY, UINT threadGroupCountZ)
 {
+    if (!s_initialized.load(std::memory_order_acquire) || !TAAConfig::Instance().enabled)
+        return false;
+
     const auto& config = TAAConfig::Instance();
     uint64_t frame = s_frameCounter.load(std::memory_order_relaxed);
 
@@ -262,43 +211,30 @@ bool OnDispatch(ID3D12GraphicsCommandList* commandList,
     static std::atomic<uint32_t> s_dispatchCallCount { 0 };
     uint32_t callNum = s_dispatchCallCount.fetch_add(1);
 
-    if (callNum < 15 || (callNum % 500 == 0))
-    {
-        LOG_INFO("[ORDO] OnDispatch #{} (thread groups: {}x{}x{}, inferred: {}x{}), frame={}",
-                 callNum, threadGroupCountX, threadGroupCountY, threadGroupCountZ,
-                 inferredW, inferredH, frame);
-    }
-
-    // If we already have a confirmed pass, check if this is the same pipeline
-    if (s_detector.HasConfirmedPass())
-    {
-        if (config.logPerFrame)
-        {
-            LOG_DEBUG("[ORDO] Confirmed TAA pass dispatched: {}x{}x{}",
-                      threadGroupCountX, threadGroupCountY, threadGroupCountZ);
-        }
-        return false; // Phase 1: don't suppress
-    }
-
-    // Discovery mode — build a snapshot and score it
+    // Discovery mode — build a snapshot from active command list bindings and score it
     DispatchSnapshot snapshot;
-    BuildSnapshot(commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ, snapshot);
+    BuildSnapshot(commandList, false, threadGroupCountX, threadGroupCountY, threadGroupCountZ, snapshot);
 
-    if (callNum < 15 || (callNum % 500 == 0))
+    if (callNum < 10)
     {
-        LOG_INFO("[ORDO]   Snapshot #{} has {} SRVs, {} UAVs (total tracked: {})",
-                 callNum, snapshot.srvs.size(), snapshot.uavs.size(), _trackedResources.size());
+        LOG_INFO("[ORDO] OnDispatch #{} (thread groups: {}x{}x{}, inferred: {}x{}): UAVs={}, RTVs={}, SRVs={}",
+                 callNum, threadGroupCountX, threadGroupCountY, threadGroupCountZ,
+                 inferredW, inferredH,
+                 snapshot.uavs.size(), snapshot.rtvs.size(), snapshot.srvs.size());
     }
 
     // Skip dispatches with too few bound resources
-    if (snapshot.srvs.size() < 2 || snapshot.uavs.empty())
+    if (snapshot.srvs.empty() && snapshot.uavs.empty() && snapshot.rtvs.empty())
         return false;
 
     auto result = s_detector.ScoreDispatch(snapshot);
 
-    if (callNum < 15 || (callNum % 500 == 0) || result.score >= 0.3f)
+    if (callNum < 15 || (callNum % 200 == 0) || result.score >= 0.3f)
     {
-        LOG_INFO("[ORDO]   Score for #{}: {:.2f}", callNum, result.score);
+        LOG_INFO("[ORDO] OnDispatch #{} (thread groups: {}x{}x{}, inferred: {}x{}, SRVs={}, UAVs={}): Score={:.2f}, frame={}",
+                 callNum, threadGroupCountX, threadGroupCountY, threadGroupCountZ,
+                 inferredW, inferredH, snapshot.srvs.size(), snapshot.uavs.size(),
+                 result.score, frame);
     }
 
     if (result.score >= s_detector.GetConfidenceThreshold())
@@ -306,12 +242,155 @@ bool OnDispatch(ID3D12GraphicsCommandList* commandList,
         s_detector.TrackCandidate(snapshot, result, frame);
     }
 
-    return false; // Phase 1: never suppress
+    if (s_detector.IsConfirmedPass(snapshot))
+    {
+        if (TAAConfig::Instance().forceUpscaling)
+        {
+            if (TAAInjector::Instance().InjectUpscaler(commandList, snapshot, result))
+                return true;
+        }
+        else
+        {
+            TAAInjector::Instance().ReleaseFeature();
+        }
+    }
+
+    return false;
+}
+
+bool OnDrawInstanced(ID3D12GraphicsCommandList* commandList,
+                     UINT vertexCountPerInstance, UINT instanceCount,
+                     UINT startVertexLocation, UINT startInstanceLocation)
+{
+    if (!s_initialized.load(std::memory_order_acquire) || !TAAConfig::Instance().enabled)
+        return false;
+
+    // Full-screen triangle is 3 vertices, full-screen quad strip is 4, quad list is 6
+    if (vertexCountPerInstance != 3 && vertexCountPerInstance != 4 && vertexCountPerInstance != 6)
+        return false;
+
+    if (instanceCount != 1)
+        return false;
+
+    uint64_t frame = s_frameCounter.load(std::memory_order_relaxed);
+
+    static std::atomic<uint32_t> s_drawCallCount { 0 };
+    uint32_t callNum = s_drawCallCount.fetch_add(1);
+
+    DispatchSnapshot snapshot;
+    BuildSnapshot(commandList, true, vertexCountPerInstance, 0, instanceCount, snapshot);
+
+    if (callNum < 10)
+    {
+        LOG_INFO("[ORDO] OnDrawInstanced #{} (verts={}, instances={}): RTVs={}, SRVs={}, DSV={}",
+                 callNum, vertexCountPerInstance, instanceCount,
+                 snapshot.rtvs.size(), snapshot.srvs.size(), snapshot.dsv.resource != nullptr);
+    }
+
+    if (snapshot.srvs.empty() && snapshot.rtvs.empty())
+        return false;
+
+    auto result = s_detector.ScoreDispatch(snapshot);
+
+    if (callNum < 20 || (callNum % 100 == 0) || result.score >= 0.3f)
+    {
+        LOG_INFO("[ORDO] OnDrawInstanced #{} (verts={}, RTVs={}, SRVs={}): Score={:.2f}, frame={}",
+                 callNum, vertexCountPerInstance, snapshot.rtvs.size(), snapshot.srvs.size(),
+                 result.score, frame);
+    }
+
+    if (result.score >= s_detector.GetConfidenceThreshold())
+    {
+        s_detector.TrackCandidate(snapshot, result, frame);
+    }
+
+    if (s_detector.IsConfirmedPass(snapshot))
+    {
+        if (TAAConfig::Instance().forceUpscaling)
+        {
+            if (TAAInjector::Instance().InjectUpscaler(commandList, snapshot, result))
+                return true;
+        }
+        else
+        {
+            TAAInjector::Instance().ReleaseFeature();
+        }
+    }
+
+    return false;
+}
+
+bool OnDrawIndexedInstanced(ID3D12GraphicsCommandList* commandList,
+                            UINT indexCountPerInstance, UINT instanceCount,
+                            UINT startIndexLocation, INT baseVertexLocation,
+                            UINT startInstanceLocation)
+{
+    if (!s_initialized.load(std::memory_order_acquire) || !TAAConfig::Instance().enabled)
+        return false;
+
+    // Full-screen indexed quad is 4 or 6 indices, full-screen triangle is 3
+    if (indexCountPerInstance != 3 && indexCountPerInstance != 4 && indexCountPerInstance != 6)
+        return false;
+
+    if (instanceCount != 1)
+        return false;
+
+    uint64_t frame = s_frameCounter.load(std::memory_order_relaxed);
+
+    static std::atomic<uint32_t> s_drawIndexedCount { 0 };
+    uint32_t callNum = s_drawIndexedCount.fetch_add(1);
+
+    DispatchSnapshot snapshot;
+    BuildSnapshot(commandList, true, 0, indexCountPerInstance, instanceCount, snapshot);
+
+    if (callNum < 10)
+    {
+        LOG_INFO("[ORDO] OnDrawIndexedInstanced #{} (indices={}, instances={}): RTVs={}, SRVs={}, DSV={}",
+                 callNum, indexCountPerInstance, instanceCount,
+                 snapshot.rtvs.size(), snapshot.srvs.size(), snapshot.dsv.resource != nullptr);
+    }
+
+    if (snapshot.srvs.empty() && snapshot.rtvs.empty())
+        return false;
+
+    auto result = s_detector.ScoreDispatch(snapshot);
+
+    if (callNum < 20 || (callNum % 100 == 0) || result.score >= 0.3f)
+    {
+        LOG_INFO("[ORDO] OnDrawIndexedInstanced #{} (indices={}, RTVs={}, SRVs={}): Score={:.2f}, frame={}",
+                 callNum, indexCountPerInstance, snapshot.rtvs.size(), snapshot.srvs.size(),
+                 result.score, frame);
+    }
+
+    if (result.score >= s_detector.GetConfidenceThreshold())
+    {
+        s_detector.TrackCandidate(snapshot, result, frame);
+    }
+
+    if (s_detector.IsConfirmedPass(snapshot))
+    {
+        if (TAAConfig::Instance().forceUpscaling)
+        {
+            if (TAAInjector::Instance().InjectUpscaler(commandList, snapshot, result))
+                return true;
+        }
+        else
+        {
+            TAAInjector::Instance().ReleaseFeature();
+        }
+    }
+
+    return false;
 }
 
 void OnPresent()
 {
-    s_frameCounter.fetch_add(1, std::memory_order_relaxed);
+    auto f = s_frameCounter.fetch_add(1, std::memory_order_relaxed);
+    if (f == 0 || f == 60 || (f % 600 == 0))
+    {
+        LOG_INFO("[ORDO] Present frame {}, TAA status: confirmed={}, candidates={}",
+                 f, s_detector.HasConfirmedPass(), s_detector.GetCandidateCount());
+    }
 }
 
 bool IsActive()
@@ -333,16 +412,15 @@ size_t GetCandidateCount()
 
 bool IsConfirmedWorking()
 {
-    // 1. TAA interception is active on a confirmed pass
-    if (IsActive())
-        return true;
+    // Must have a positively identified and confirmed TAA pass
+    if (!HasConfirmedPass())
+        return false;
 
-    // 2. An upscaler feature is currently active, initialized, and not frozen
+    // If force upscaling override is enabled, it is ONLY confirmed working
+    // if the upscaler feature has actually been created, initialized, and is actively evaluating
     if (TAAConfig::Instance().forceUpscaling)
     {
-        auto feat = State::Instance().currentFeature;
-        if (feat != nullptr && feat->IsInited() && !feat->IsFrozen())
-            return true;
+        return TAAInjector::Instance().IsFeatureActive();
     }
 
     return false;

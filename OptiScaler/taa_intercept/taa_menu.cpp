@@ -75,18 +75,26 @@ void RenderMenu(Config* config, float menuResScale)
         {
             // Armed but not confirmed working yet -> AMBER / YELLOW
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.70f, 0.20f, 1.0f));
-            ImGui::Text("  [ARMED / WAITING] Override enabled - searching for TAA pass / feature");
+            if (HasConfirmedPass())
+                ImGui::Text("  [ARMED / TAA CONFIRMED] Pass confirmed - injecting upscaler...");
+            else
+                ImGui::Text("  [ARMED / SEARCHING] Override enabled - searching for TAA pass...");
             ImGui::PopStyleColor();
 
             size_t candCount = GetCandidateCount();
             ImGui::TextDisabled("  Candidates tracked: %zu | Pass confirmed: %s",
                                 candCount, HasConfirmedPass() ? "Yes" : "No");
-            ImGui::TextDisabled("  Note: Elden Ring uses full-screen draw passes (DrawInstanced hook pending).");
         }
         else
         {
             // Inactive safe mode -> GRAY
             ImGui::TextDisabled("  [STANDBY] Override inactive (safe mode, no injection)");
+            if (HasConfirmedPass())
+            {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.3f, 0.85f, 1.0f, 1.0f));
+                ImGui::Text("  [PASS CONFIRMED] TAA pass confirmed - toggle override ON to activate");
+                ImGui::PopStyleColor();
+            }
         }
 
         ImGui::Spacing();

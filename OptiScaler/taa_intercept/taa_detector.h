@@ -46,34 +46,38 @@ struct BoundResource
 /// ```
 struct DispatchSnapshot
 {
+    bool isRaster = false;
+
+    // Compute dimensions
     uint32_t threadGroupCountX = 0;
     uint32_t threadGroupCountY = 0;
     uint32_t threadGroupCountZ = 0;
 
+    // Raster draw parameters
+    uint32_t vertexCount   = 0;
+    uint32_t indexCount    = 0;
+    uint32_t instanceCount = 0;
+
     std::vector<BoundResource> srvs;
     std::vector<BoundResource> uavs;
+    std::vector<BoundResource> rtvs;
+    BoundResource dsv;
 
     ID3D12PipelineState* pipelineState = nullptr;
     ID3D12RootSignature* rootSignature = nullptr;
 };
 
-/// Result of scoring a dispatch against TAA heuristics.
-///
-/// ```cpp
-/// DetectionResult result = detector.ScoreDispatch(snapshot);
-/// if (result.score >= detector.GetConfidenceThreshold()) {
-///     LOG_INFO("[ORDO] TAA candidate found! Score: {}", result.score);
-/// }
-/// ```
+/// Result of scoring a dispatch or draw against TAA heuristics.
 struct DetectionResult
 {
     float score = 0.0f;           // 0.0 = not TAA, 1.0 = definitely TAA
+    bool isRaster = false;
 
     int motionVectorIndex = -1;   // Index into srvs for the motion vector SRV
     int colorInputIndex   = -1;   // Index into srvs for current color
     int colorHistoryIndex = -1;   // Index into srvs for history color
-    int depthIndex        = -1;   // Index into srvs for depth
-    int outputIndex       = -1;   // Index into uavs for output
+    int depthIndex        = -1;   // Index into srvs for depth (-2 if from DSV)
+    int outputIndex       = -1;   // Index into uavs (compute) or rtvs (raster) for output
 
     uint32_t inferredWidth  = 0;
     uint32_t inferredHeight = 0;
@@ -133,6 +137,9 @@ class TAADetector
 
     /// Get the confirmed TAA pass tracker. Only valid if HasConfirmedPass() is true.
     const CandidateTracker& GetConfirmedPass() const;
+
+    /// Check if a specific snapshot matches the confirmed TAA pass.
+    bool IsConfirmedPass(const DispatchSnapshot& snapshot) const;
 
     /// Reset all tracking state. Used when re-detecting after a resolution change.
     void Reset();

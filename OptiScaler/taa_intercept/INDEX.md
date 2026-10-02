@@ -23,6 +23,8 @@ DLSS/FSR support can use DLSS Super Resolution.
 | `taa_frame_context.h` | Per-frame captured buffer state for the detected TAA pass. |
 | `taa_interceptor.h` | Public API — `Initialize()`, `Shutdown()`, `OnDispatch()` entry points. |
 | `taa_interceptor.cpp` | Dispatch hook orchestration and TAA pass suppression. |
+| `taa_injector.h` | NGX upscaler creation, buffer binding, and evaluate injection declarations. |
+| `taa_injector.cpp` | NGX SuperSampling feature management and evaluate execution. |
 | `taa_menu.h` | ImGui overlay menu declarations for forced upscaling override and quality mode. |
 | `taa_menu.cpp` | ImGui UI rendering for the ORDO forced upscaling override and TAA interceptor section. |
 | `taa_profiles.h` | Per-game TAA signature profiles (Elden Ring, UE4/5, etc.). |
