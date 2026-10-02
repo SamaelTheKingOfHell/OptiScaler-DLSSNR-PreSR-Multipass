@@ -534,6 +534,15 @@ void MenuCommon::RenderUpscalerCombo(const API api, Upscaler currentUpscaler, co
             if (ImGui::Selectable(UpscalerDisplayName(opt, api).c_str(), isSelected))
             {
                 State::Instance().newBackend = opt;
+                if (api == API::DX11)
+                    Config::Instance()->Dx11Upscaler = opt;
+                else if (api == API::DX12)
+                    Config::Instance()->Dx12Upscaler = opt;
+                else if (api == API::Vulkan)
+                    Config::Instance()->VulkanUpscaler = opt;
+                currentBackend = opt;
+                MARK_ALL_BACKENDS_CHANGED();
+                Config::Instance()->SaveIni();
             }
         }
         ImGui::EndCombo();
@@ -3206,6 +3215,22 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
         }
 
         ImGui::PopItemWidth();
+
+        ImGui::SameLine(0.0f, 6.0f);
+        if (ImGui::Button("Apply Backend##Top") && State::Instance().newBackend != Upscaler::Reset)
+        {
+            if (state.api == API::DX11)
+                Config::Instance()->Dx11Upscaler = State::Instance().newBackend;
+            else if (state.api == API::DX12)
+                Config::Instance()->Dx12Upscaler = State::Instance().newBackend;
+            else if (state.api == API::Vulkan)
+                Config::Instance()->VulkanUpscaler = State::Instance().newBackend;
+
+            currentBackend = State::Instance().newBackend;
+            MARK_ALL_BACKENDS_CHANGED();
+            Config::Instance()->SaveIni();
+        }
+
         ImGui::Spacing();
     }
     // --- [ORDO] END ------------------------------------------------------------------

@@ -52,4 +52,17 @@ void OnPresent();
 /// ```
 bool IsActive();
 
+/// Check if upscaler injection is confirmed working.
+/// Returns true ONLY if upscaling is actively running.
+/// ```cpp
+/// if (ordo::taa::IsConfirmedWorking()) { /* safe to show green indicator */ }
+/// ```
+bool IsConfirmedWorking();
+
+/// Number of tracked TAA candidates in the current session.
+size_t GetCandidateCount();
+
+/// Check if a TAA pass has been confirmed.
+bool HasConfirmedPass();
+
 } // namespace ordo::taa

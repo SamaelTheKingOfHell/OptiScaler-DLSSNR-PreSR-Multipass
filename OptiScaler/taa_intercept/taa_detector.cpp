@@ -340,6 +340,12 @@ bool TAADetector::HasConfirmedPass() const
     return _confirmedIndex >= 0 && _confirmedIndex < static_cast<int>(_candidates.size());
 }
 
+size_t TAADetector::GetCandidateCount() const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _candidates.size();
+}
+
 const CandidateTracker& TAADetector::GetConfirmedPass() const
 {
     std::lock_guard<std::mutex> lock(_mutex);

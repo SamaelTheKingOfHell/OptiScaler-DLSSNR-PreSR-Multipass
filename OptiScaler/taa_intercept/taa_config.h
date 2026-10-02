@@ -51,6 +51,9 @@ struct TAAConfig
     static const char* QualityModeName(uint32_t mode);
     static float QualityModeRatio(uint32_t mode);
 
+    // --- Stored INI path ---
+    std::string iniFilePath;
+
     // --- Singleton access ---
     static TAAConfig& Instance();
 
@@ -61,6 +64,14 @@ struct TAAConfig
     /// TAAConfig::Instance().LoadFromINI("D:\\Game\\OptiScaler.ini");
     /// ```
     void LoadFromINI(const std::string& iniPath);
+
+    /// Save current configuration to an INI file under [OrdoTAA].
+    /// If iniPath is empty, uses iniFilePath or OptiScaler's active INI path.
+    ///
+    /// ```cpp
+    /// TAAConfig::Instance().SaveToINI();
+    /// ```
+    bool SaveToINI(const std::string& iniPath = "");
 };
 
 } // namespace ordo::taa

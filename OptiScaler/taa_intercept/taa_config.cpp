@@ -3,6 +3,9 @@
 
 #include <fstream>
 #include <algorithm>
+#include <SimpleIni.h>
+#include <Config.h>
+#include "Util.h"
 
 namespace ordo::taa
 {
@@ -69,6 +72,7 @@ static uint32_t ParseUint(const std::string& val, uint32_t defaultVal)
 
 void TAAConfig::LoadFromINI(const std::string& iniPath)
 {
+    iniFilePath = iniPath;
     std::ifstream file(iniPath);
     if (!file.is_open())
     {
@@ -165,6 +169,62 @@ float TAAConfig::QualityModeRatio(uint32_t mode)
     case 4: return 3.00f;
     default: return 1.50f;
     }
+}
+
+bool TAAConfig::SaveToINI(const std::string& iniPath)
+{
+    std::string targetPath = iniPath.empty() ? iniFilePath : iniPath;
+    if (targetPath.empty())
+    {
+        if (Config::Instance() != nullptr)
+        {
+            auto p = Config::Instance()->AbsoluteFileName();
+            if (!p.empty())
+                targetPath = p.string();
+        }
+    }
+
+    if (targetPath.empty())
+    {
+        targetPath = (Util::DllPath().parent_path() / L"OptiScaler.ini").string();
+    }
+
+    if (targetPath.empty())
+    {
+        LOG_WARN("[ORDO] TAAConfig::SaveToINI: No INI file path available");
+        return false;
+    }
+
+    CSimpleIniA ini;
+    ini.SetUnicode();
+    // Load existing INI file so all comments and existing sections are preserved
+    if (ini.LoadFile(targetPath.c_str()) < 0)
+    {
+        LOG_WARN("[ORDO] TAAConfig::SaveToINI: Could not load INI file at {}", targetPath);
+        return false;
+    }
+
+    ini.SetBoolValue("OrdoTAA", "Enabled", enabled);
+    ini.SetBoolValue("OrdoTAA", "ForceUpscaling", forceUpscaling);
+    ini.SetLongValue("OrdoTAA", "QualityMode", static_cast<long>(qualityMode));
+    ini.SetDoubleValue("OrdoTAA", "CustomScaleRatio", static_cast<double>(customScaleRatio));
+    ini.SetBoolValue("OrdoTAA", "LogDiscovery", logDiscovery);
+    ini.SetBoolValue("OrdoTAA", "LogPerFrame", logPerFrame);
+    ini.SetLongValue("OrdoTAA", "ConfirmFrames", static_cast<long>(confirmFrames));
+    ini.SetLongValue("OrdoTAA", "MinDispatchWidth", static_cast<long>(minDispatchWidth));
+    ini.SetLongValue("OrdoTAA", "MinDispatchHeight", static_cast<long>(minDispatchHeight));
+    ini.SetLongValue("OrdoTAA", "MotionVectorFormat", static_cast<long>(motionVectorFormat));
+    if (!profileName.empty())
+        ini.SetValue("OrdoTAA", "Profile", profileName.c_str());
+
+    if (ini.SaveFile(targetPath.c_str()) >= 0)
+    {
+        LOG_INFO("[ORDO] TAAConfig::SaveToINI: Successfully saved [OrdoTAA] to {}", targetPath);
+        return true;
+    }
+
+    LOG_ERROR("[ORDO] TAAConfig::SaveToINI: Failed saving [OrdoTAA] to {}", targetPath);
+    return false;
 }
 
 } // namespace ordo::taa

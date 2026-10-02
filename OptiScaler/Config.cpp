@@ -10,6 +10,10 @@
 
 #include <SimpleIni.h>
 
+// --- [ORDO] TAA / Forced Upscaling Configuration ---
+#include <taa_intercept/taa_config.h>
+// --- [ORDO] END -------------------------------------
+
 static CSimpleIniA ini;
 
 static inline int64_t GetTicks()
@@ -898,6 +902,10 @@ bool Config::Reload(std::filesystem::path iniPath)
         {
             _DONTUSE_Fsr4ForceEnableInt8.set_from_config(readBool("FSR", "Fsr4ForceEnableInt8"));
         }
+
+        // --- [ORDO] Load TAA Interceptor Settings ---
+        ordo::taa::TAAConfig::Instance().LoadFromINI(iniPath.string());
+        // --- [ORDO] END -----------------------------
 
         return true;
     }
@@ -1840,6 +1848,24 @@ bool Config::SaveIni(std::filesystem::path destination)
         ini.Delete("FSR", "Fsr4ForceEnableInt8");
         ini.Delete("Nukems", "MakeDepthCopy", true);
     }
+
+    // --- [ORDO] Save OrdoTAA Configuration ---
+    {
+        auto& taaCfg = ordo::taa::TAAConfig::Instance();
+        ini.SetValue("OrdoTAA", "Enabled", GetBoolValue(taaCfg.enabled).c_str());
+        ini.SetValue("OrdoTAA", "ForceUpscaling", GetBoolValue(taaCfg.forceUpscaling).c_str());
+        ini.SetValue("OrdoTAA", "QualityMode", std::to_string(taaCfg.qualityMode).c_str());
+        ini.SetValue("OrdoTAA", "CustomScaleRatio", std::to_string(taaCfg.customScaleRatio).c_str());
+        ini.SetValue("OrdoTAA", "LogDiscovery", GetBoolValue(taaCfg.logDiscovery).c_str());
+        ini.SetValue("OrdoTAA", "LogPerFrame", GetBoolValue(taaCfg.logPerFrame).c_str());
+        ini.SetValue("OrdoTAA", "ConfirmFrames", std::to_string(taaCfg.confirmFrames).c_str());
+        ini.SetValue("OrdoTAA", "MinDispatchWidth", std::to_string(taaCfg.minDispatchWidth).c_str());
+        ini.SetValue("OrdoTAA", "MinDispatchHeight", std::to_string(taaCfg.minDispatchHeight).c_str());
+        ini.SetValue("OrdoTAA", "MotionVectorFormat", std::to_string(taaCfg.motionVectorFormat).c_str());
+        if (!taaCfg.profileName.empty())
+            ini.SetValue("OrdoTAA", "Profile", taaCfg.profileName.c_str());
+    }
+    // --- [ORDO] END --------------------------
 
     const auto pathWStr = (destination.empty() ? absoluteFileName : destination).wstring();
 

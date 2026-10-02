@@ -321,4 +321,31 @@ bool IsActive()
            s_detector.HasConfirmedPass();
 }
 
+bool HasConfirmedPass()
+{
+    return s_detector.HasConfirmedPass();
+}
+
+size_t GetCandidateCount()
+{
+    return s_detector.GetCandidateCount();
+}
+
+bool IsConfirmedWorking()
+{
+    // 1. TAA interception is active on a confirmed pass
+    if (IsActive())
+        return true;
+
+    // 2. An upscaler feature is currently active, initialized, and not frozen
+    if (TAAConfig::Instance().forceUpscaling)
+    {
+        auto feat = State::Instance().currentFeature;
+        if (feat != nullptr && feat->IsInited() && !feat->IsFrozen())
+            return true;
+    }
+
+    return false;
+}
+
 } // namespace ordo::taa

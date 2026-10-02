@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "SysUtils.h"
 #include "State.h"
@@ -785,6 +785,7 @@ class Config
     std::vector<std::string> GetConfigLog();
 
     static Config* Instance();
+    std::filesystem::path AbsoluteFileName() const { return absoluteFileName; }
 
   private:
     inline static Config* _config;

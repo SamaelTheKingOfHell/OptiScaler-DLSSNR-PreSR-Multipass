@@ -5,6 +5,7 @@
 #include "taa_detector.h"
 
 #include <Config.h>
+#include <State.h>
 #include <imgui/imgui.h>
 #include "Logger.h"
 
@@ -26,9 +27,19 @@ static void HelpMarker(const char* tip)
     }
 }
 
+static void SaveAllSettings(Config* config)
+{
+    TAAConfig::Instance().SaveToINI();
+    if (config != nullptr)
+        config->SaveIni();
+    else if (Config::Instance() != nullptr)
+        Config::Instance()->SaveIni();
+}
+
 void RenderMenu(Config* config, float menuResScale)
 {
     auto& taaCfg = TAAConfig::Instance();
+    static double s_lastSaveNotificationTime = -10.0;
 
     ImGui::Spacing();
     if (ImGui::CollapsingHeader("ORDO - Force Upscaling & TAA Interceptor", ImGuiTreeNodeFlags_DefaultOpen))
@@ -43,20 +54,38 @@ void RenderMenu(Config* config, float menuResScale)
         if (ImGui::Checkbox("Force Upscaling Override", &forceUpscaling))
         {
             taaCfg.forceUpscaling = forceUpscaling;
-            LOG_INFO("[ORDO] Force Upscaling Override toggled: {}", forceUpscaling ? "ON" : "OFF");
+            SaveAllSettings(config);
+            LOG_INFO("[ORDO] Force Upscaling Override toggled: {} and saved to INI", forceUpscaling ? "ON" : "OFF");
         }
         HelpMarker("Manually injects the selected upscaler backend into the game's render pipeline.\n"
                    "Kept OFF by default to avoid crashes on game launch.\n"
                    "Toggle ON once in-game to activate upscaler injection.");
 
-        if (forceUpscaling)
+        // Verification: Only green if confirmed working!
+        const bool confirmedWorking = IsConfirmedWorking();
+
+        if (forceUpscaling && confirmedWorking)
         {
+            // Confirmed working -> GREEN
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.2f, 1.0f, 0.4f, 1.0f));
-            ImGui::Text("  [ARMED] Force upscaling override active");
+            ImGui::Text("  [CONFIRMED WORKING] Upscaler injected and active");
             ImGui::PopStyleColor();
+        }
+        else if (forceUpscaling && !confirmedWorking)
+        {
+            // Armed but not confirmed working yet -> AMBER / YELLOW
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.70f, 0.20f, 1.0f));
+            ImGui::Text("  [ARMED / WAITING] Override enabled - searching for TAA pass / feature");
+            ImGui::PopStyleColor();
+
+            size_t candCount = GetCandidateCount();
+            ImGui::TextDisabled("  Candidates tracked: %zu | Pass confirmed: %s",
+                                candCount, HasConfirmedPass() ? "Yes" : "No");
+            ImGui::TextDisabled("  Note: Elden Ring uses full-screen draw passes (DrawInstanced hook pending).");
         }
         else
         {
+            // Inactive safe mode -> GRAY
             ImGui::TextDisabled("  [STANDBY] Override inactive (safe mode, no injection)");
         }
 
@@ -82,7 +111,8 @@ void RenderMenu(Config* config, float menuResScale)
         if (ImGui::Combo("Quality Mode", &currentQuality, qualityNames, IM_ARRAYSIZE(qualityNames)))
         {
             taaCfg.qualityMode = static_cast<uint32_t>(currentQuality);
-            LOG_INFO("[ORDO] Quality mode changed to: {} (ratio: {:.2f}x)",
+            SaveAllSettings(config);
+            LOG_INFO("[ORDO] Quality mode changed to: {} (ratio: {:.2f}x) and saved to INI",
                      qualityNames[currentQuality], TAAConfig::QualityModeRatio(taaCfg.qualityMode));
         }
         ImGui::PopItemWidth();
@@ -96,6 +126,10 @@ void RenderMenu(Config* config, float menuResScale)
             if (ImGui::SliderFloat("Scale Ratio", &customRatio, 1.0f, 4.0f, "%.2fx"))
             {
                 taaCfg.customScaleRatio = customRatio;
+            }
+            if (ImGui::IsItemDeactivatedAfterEdit())
+            {
+                SaveAllSettings(config);
             }
             ImGui::PopItemWidth();
             HelpMarker("Custom scale ratio multiplier (e.g. 1.50 = 1.50x scaling)");
@@ -111,7 +145,8 @@ void RenderMenu(Config* config, float menuResScale)
         if (ImGui::Checkbox("Enable TAA Interceptor", &interceptorEnabled))
         {
             taaCfg.enabled = interceptorEnabled;
-            LOG_INFO("[ORDO] TAA Interceptor enabled toggled: {}", interceptorEnabled);
+            SaveAllSettings(config);
+            LOG_INFO("[ORDO] TAA Interceptor enabled toggled: {} and saved to INI", interceptorEnabled);
         }
         HelpMarker("Monitors D3D12 Draw and Dispatch passes to identify and intercept the game's TAA pass.");
 
@@ -122,8 +157,26 @@ void RenderMenu(Config* config, float menuResScale)
         if (ImGui::Checkbox("Log Discovery Telemetry", &logDiscovery))
         {
             taaCfg.logDiscovery = logDiscovery;
+            SaveAllSettings(config);
         }
         HelpMarker("Outputs candidate heuristic scores and resource details to OptiScaler.log for debugging.");
+
+        // -------------------------------------------------------------
+        // 4. Persistence Controls
+        // -------------------------------------------------------------
+        ImGui::Spacing();
+        if (ImGui::Button("Save ORDO Settings"))
+        {
+            SaveAllSettings(config);
+            s_lastSaveNotificationTime = ImGui::GetTime();
+        }
+        HelpMarker("Saves all ORDO overrides and quality options to OptiScaler.ini immediately.");
+
+        if (ImGui::GetTime() - s_lastSaveNotificationTime < 3.0)
+        {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "Settings saved to OptiScaler.ini!");
+        }
 
         ImGui::Spacing();
         ImGui::Unindent(16.0f);

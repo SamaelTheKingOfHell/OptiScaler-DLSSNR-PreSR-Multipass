@@ -128,6 +128,9 @@ class TAADetector
     /// Check if we have a confirmed TAA pass.
     bool HasConfirmedPass() const;
 
+    /// Get the number of candidate passes currently tracked.
+    size_t GetCandidateCount() const;
+
     /// Get the confirmed TAA pass tracker. Only valid if HasConfirmedPass() is true.
     const CandidateTracker& GetConfirmedPass() const;
 
